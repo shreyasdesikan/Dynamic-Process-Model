@@ -1,0 +1,19 @@
+name: MLME-Lab
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - numpy
+  - pandas
+  - matplotlib
+  - seaborn
+  - scikit-learn
+  - pytorch
+  - torchvision
+  - torchaudio
+  - hdbscan
+  - umap-learn
+  - plotly
+  - pyarrow
+  - jupyter
