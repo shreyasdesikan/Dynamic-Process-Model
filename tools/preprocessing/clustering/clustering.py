@@ -1,4 +1,5 @@
 import os
+import shutil
 import numpy as np
 import pandas as pd
 from scipy.stats import zscore
@@ -181,25 +182,50 @@ class BatchClustering:
             plt.grid(alpha=0.3)
             plt.show()
             
-    def get_cluster_assignments(self):
-        """Return dictionary mapping cluster labels to batch filenames"""
+    def get_cluster_assignments(self, save_to_disk=False, output_root="Data/clustered"):
+        """
+        Return dictionary mapping cluster labels to batch filenames.
+        Optionally saves clustered batch files to disk.
+        """
         cluster_dict = {}
         for cluster_id in np.unique(self.labels_):
             mask = self.clean_features['cluster'] == cluster_id
             batch_names = self.clean_features.loc[mask, 'batch'].tolist()
             cluster_dict[cluster_id] = batch_names
-        
+
         # Print summary
         print("\n=== Cluster Assignments ===")
         for cluster_id, batches in sorted(cluster_dict.items()):
             print(f"Cluster {cluster_id}: {len(batches)} batches")
-            # Show first few examples
             examples = batches[:3]
             if len(batches) > 3:
                 examples.append('...')
             print(f"  Examples: {examples}")
-        
+
+        # Optional: Save files to disk
+        if save_to_disk:
+            self.save_clustered_batches(assignments=cluster_dict, output_root=output_root)
+
         return cluster_dict
+
+    
+    def save_clustered_batches(self, assignments, output_root="Data/clustered"):
+        """
+        Copy batch files into cluster-specific subfolders under output_root.
+        Requires an assignment dict from get_cluster_assignments().
+        """
+        os.makedirs(output_root, exist_ok=True)
+
+        for cluster_id, batch_list in assignments.items():
+            cluster_dir = os.path.join(output_root, f"cluster{cluster_id}")
+            os.makedirs(cluster_dir, exist_ok=True)
+
+            for batch_name in batch_list:
+                src = os.path.join(self.data_dir, batch_name)
+                dst = os.path.join(cluster_dir, batch_name)
+                shutil.copyfile(src, dst)
+
+        print(f"\nClustered files saved to: {output_root}/cluster*/")
                 
 
 if __name__ == "__main__":
@@ -229,5 +255,5 @@ if __name__ == "__main__":
     bc.cluster()
     bc.plot_clusters()
     
-    # 6) Print clusters
-    bc.get_cluster_assignments()
+    # 7) Print cluster assignments
+    bc.get_cluster_assignments(save_to_disk=True)
