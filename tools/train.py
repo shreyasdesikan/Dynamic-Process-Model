@@ -3,15 +3,28 @@ import argparse
 import time
 import numpy as np
 import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
-from sklearn.metrics import mean_squared_error
 import matplotlib.pyplot as plt
 from models.ANN.narx_model import get_model, get_loss, get_optimizer
 
 STATE_COLS = 6
 CONTROL_COLS = 7
+
+def clean_state_spikes(data, z_thresh=3.0):
+    """Clean spikes in the first 6 columns (state variables) using z-score thresholding."""
+    cleaned = data.copy()
+    states = cleaned[:, :STATE_COLS]
+    mean = np.mean(states, axis=0)
+    std = np.std(states, axis=0)
+
+    z_scores = (states - mean) / std
+    spike_mask = np.abs(z_scores) > z_thresh
+
+    for i in range(STATE_COLS):
+        mean_val = np.mean(states[:, i])
+        cleaned[spike_mask[:, i], i] = mean_val
+
+    return cleaned
 
 def load_batch_data(file_path, window_size, scaler=None):
     df = np.loadtxt(file_path, skiprows=1)
@@ -121,9 +134,16 @@ def train_cluster(cluster_id, cluster_path, args, run_id):
     all_files = [os.path.join(cluster_path, f) for f in os.listdir(cluster_path) if f.endswith(".txt")]
     train_files, test_files = split_data(all_files, test_ratio=0.1)
 
-    # Fit scaler on training data
+    # Load and clean training data
+    all_train_df = []
+    for f in train_files:
+        raw = np.loadtxt(f, skiprows=1)
+        # cleaned = clean_state_spikes(raw, z_thresh=3.5)
+        cleaned = raw
+        all_train_df.append(cleaned)
+
+    # Fit scaler on cleaned training data
     scaler = MinMaxScaler()
-    all_train_df = [np.loadtxt(f, skiprows=1) for f in train_files]
     scaler.fit(np.concatenate(all_train_df, axis=0))
 
     all_train_X, all_train_Y = [], []
@@ -143,12 +163,25 @@ def train_cluster(cluster_id, cluster_path, args, run_id):
     model = get_model(input_size=(args.window_size * (STATE_COLS + CONTROL_COLS)), model_type=args.model, window_size=args.window_size).to(device)
     criterion = get_loss()
     optimizer = get_optimizer(model, lr=args.lr, use_adamw=True)
+    
+    if args.use_saved_model is not None:
+        model_path = f"../results/model_cluster{cluster_id}_run{args.use_saved_model}.pt"
+        if os.path.exists(model_path):
+            print(f"🔁 Using saved model from {model_path}")
+            model.load_state_dict(torch.load(model_path, map_location=device))
+            evaluate_model(model, test_X, test_Y, run_id=args.use_saved_model, cluster_id=cluster_id, scaler=scaler)
+            return  # Exit early to skip training
+        else:
+            print(f"❌ Model file not found at {model_path}, proceeding to train a new model.")
 
     if args.log_hyperparams:
         log_hyperparams(run_id, args, cluster_id)
 
     train_losses, val_losses = [], []
     num_epochs = args.epochs
+    
+    best_val_loss = float('inf')
+    epochs_without_improvement = 0
 
     for epoch in range(num_epochs):
         model.train()
@@ -174,7 +207,20 @@ def train_cluster(cluster_id, cluster_path, args, run_id):
             val_losses.append(val_loss / len(batches[:max(1, len(batches)//5)]))
 
         print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_losses[-1]:.4f}, Val Loss: {val_losses[-1]:.4f}")
+        
+        # Early stopping check
+        if val_losses[-1] < best_val_loss:
+            best_val_loss = val_losses[-1]
+            epochs_without_improvement = 0
+            best_model_state = model.state_dict()  # Save best model
+        else:
+            epochs_without_improvement += 1
+            if epochs_without_improvement >= args.early_stop_patience:
+                print(f"⏹️ Early stopping at epoch {epoch+1}. No improvement for {args.early_stop_patience} epochs.")
+                break
 
+    model.load_state_dict(best_model_state)
+    
     if args.save_model:
         torch.save(model.state_dict(), f"../results/model_cluster{cluster_id}_run{run_id}.pt")
 
@@ -196,6 +242,7 @@ def main():
     parser.add_argument("--log_hyperparams", action="store_true")
     parser.add_argument("--save_model", action="store_true")
     parser.add_argument("--use_saved_model", type=int, help="Use a saved model by run_id instead of training")
+    parser.add_argument("--early_stop_patience", type=int, default=10, help="Patience for early stopping")
     args = parser.parse_args()
 
     base_path = "../Data/clustered"

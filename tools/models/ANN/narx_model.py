@@ -4,7 +4,7 @@ from torch.optim import AdamW
 
 
 class SimpleANNModel(nn.Module):
-    def __init__(self, input_size=65, hidden_sizes=[64], output_size=6):
+    def __init__(self, input_size=65, hidden_sizes=[64, 64, 64], output_size=6):
         super(SimpleANNModel, self).__init__()
         layers = []
         last_size = input_size
