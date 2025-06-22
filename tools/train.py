@@ -5,7 +5,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.metrics import mean_squared_error
 import matplotlib.pyplot as plt
 from models.ANN.narx_model import get_model, get_loss, get_optimizer
 
@@ -14,11 +15,7 @@ CONTROL_COLS = 7
 
 def load_batch_data(file_path, window_size, scaler=None):
     df = np.loadtxt(file_path, skiprows=1)
-    if scaler is None:
-        scaler = MinMaxScaler()
-        scaled = scaler.fit_transform(df)
-    else:
-        scaled = scaler.transform(df)
+    scaled = scaler.transform(df) if scaler else df
 
     X, Y = [], []
     for t in range(len(scaled) - window_size):
@@ -80,22 +77,42 @@ def plot_losses(train_losses, val_losses, run_id=None, log_hyperparams=False, lo
         plt.show()
     plt.close()
 
-def evaluate_model(model, test_X, test_Y, run_id=None, cluster_id=None):
+def evaluate_model(model, test_X, test_Y, run_id=None, cluster_id=None, scaler=None):
     model.eval()
     with torch.no_grad():
         device = next(model.parameters()).device
         test_tensor = torch.tensor(test_X, dtype=torch.float32).to(device)
-        preds = model(test_tensor).cpu().detach().numpy()
-        mse = np.mean((preds - test_Y) ** 2, axis=0)
+        scaled_preds = model(test_tensor).cpu().numpy()
+        scaled_truth = test_Y
+
+        # Scaled MSE
+        mse_scaled = np.mean((scaled_preds - scaled_truth) ** 2, axis=0)
+
+        # Unscaled MSE (only on state columns)
+        padded_preds = np.hstack([scaled_preds, np.zeros((scaled_preds.shape[0], CONTROL_COLS))])
+        padded_truth = np.hstack([scaled_truth, np.zeros((scaled_truth.shape[0], CONTROL_COLS))])
+        unscaled_preds = scaler.inverse_transform(padded_preds)[:, :STATE_COLS]
+        unscaled_truth = scaler.inverse_transform(padded_truth)[:, :STATE_COLS]
+        mse_unscaled = np.mean((unscaled_preds - unscaled_truth) ** 2, axis=0)
+
         state_names = ['c', 'T_PM', 'd50', 'd90', 'd10', 'T_TM']
-        print("Test MSE per state:")
-        for name, m in zip(state_names, mse):
-            print(f"{name}: {m:.6f}")
+
+        print("Test MSE per state (scaled):")
+        for name, m in zip(state_names, mse_scaled):
+            print(f"{name}: {m:.6e}")
+
+        print("\nTest MSE per state (unscaled):")
+        for name, m in zip(state_names, mse_unscaled):
+            print(f"{name}: {m:.6e}")
+
         if run_id is not None:
             with open(f"../results/test_results_log.txt", "a") as f:
-                f.write(f"Run ID: {run_id}, Cluster {cluster_id} - Test MSE:\n")
-                for name, m in zip(state_names, mse):
-                    f.write(f"{name}: {m:.6f}\n")
+                f.write(f"Run ID: {run_id}, Cluster {cluster_id} - Test MSE (scaled):\n")
+                for name, m in zip(state_names, mse_scaled):
+                    f.write(f"{name}: {m:.6e}\n")
+                f.write(f"Run ID: {run_id}, Cluster {cluster_id} - Test MSE (unscaled):\n")
+                for name, m in zip(state_names, mse_unscaled):
+                    f.write(f"{name}: {m:.6e}\n")
                 f.write("\n")
 
 def train_cluster(cluster_id, cluster_path, args, run_id):
@@ -164,7 +181,7 @@ def train_cluster(cluster_id, cluster_path, args, run_id):
     plot_losses(train_losses, val_losses, run_id=run_id, log_hyperparams=args.log_hyperparams,
                 log_scale=args.log_scale, model_type=args.model)
 
-    evaluate_model(model, test_X, test_Y, run_id=run_id, cluster_id=cluster_id)
+    evaluate_model(model, test_X, test_Y, run_id=run_id, cluster_id=cluster_id, scaler=scaler)
 
 def main():
     parser = argparse.ArgumentParser()
