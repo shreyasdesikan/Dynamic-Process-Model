@@ -2,27 +2,44 @@ import os
 import argparse
 import time
 import numpy as np
+import random
 import torch
+from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 from models.ANN.narx_model import get_model, get_loss, get_optimizer
 
 STATE_COLS = 6
 CONTROL_COLS = 7
 
+class NARXDataset(Dataset):
+    def __init__(self, X, y):
+        self.X = torch.tensor(np.array(X), dtype=torch.float32)
+        self.y = torch.tensor(np.array(y), dtype=torch.float32)
+        # self.X = torch.from_numpy(X).float()
+        # self.y = torch.from_numpy(y).float()
+
+    def __len__(self):
+        return len(self.y)
+
+    def __getitem__(self, idx):
+        return self.X[idx], self.y[idx]
+
 def clean_state_spikes(data, z_thresh=3.0):
-    """Clean spikes in the first 6 columns (state variables) using z-score thresholding."""
+    """Clean spikes in d50, d90, and d10 columns using z-score thresholding."""
     cleaned = data.copy()
     states = cleaned[:, :STATE_COLS]
-    mean = np.mean(states, axis=0)
-    std = np.std(states, axis=0)
+    target_indices = [2, 3, 4]  # d50, d90, d10
 
-    z_scores = (states - mean) / std
-    spike_mask = np.abs(z_scores) > z_thresh
-
-    for i in range(STATE_COLS):
-        mean_val = np.mean(states[:, i])
-        cleaned[spike_mask[:, i], i] = mean_val
+    for i in target_indices:
+        col = states[:, i]
+        mean = np.mean(col)
+        std = np.std(col)
+        z_scores = (col - mean) / std
+        spike_mask = np.abs(z_scores) > z_thresh
+        mean_val = np.mean(col)
+        cleaned[spike_mask, i] = mean_val
 
     return cleaned
 
@@ -39,7 +56,7 @@ def load_batch_data(file_path, window_size, scaler=None):
 
     return np.array(X), np.array(Y)
 
-def create_batches(all_X, all_Y, batch_size):
+def create_batches_custom(all_X, all_Y, batch_size):
     total_windows = min([len(x) for x in all_X])
     num_batches = (total_windows + batch_size - 1) // batch_size
     batches = []
@@ -75,8 +92,9 @@ def log_hyperparams(run_id, args, cluster_id):
 
 def plot_losses(train_losses, val_losses, run_id=None, log_hyperparams=False, log_scale=False, model_type="ann"):
     plt.figure()
-    plt.plot(train_losses, label="Train")
-    plt.plot(val_losses, label="Validation")
+    # plt.plot(train_losses, label="Train")
+    plt.plot(range(2, len(train_losses)+1), train_losses[1:], label="Train")
+    plt.plot(range(2, len(train_losses)+1), val_losses[1:], label="Validation")
     if log_scale:
         plt.yscale("log")
     plt.xlabel("Epoch")
@@ -89,6 +107,50 @@ def plot_losses(train_losses, val_losses, run_id=None, log_hyperparams=False, lo
     else:
         plt.show()
     plt.close()
+
+def plot_sample_prediction(model, scaler, test_files, window_size, run_id, cluster_id):
+    os.makedirs(f"../results/{run_id}", exist_ok=True)
+
+    # Pick a random test file
+    sample_file = random.choice(test_files)
+    raw_data = clean_state_spikes(np.loadtxt(sample_file, skiprows=1), z_thresh=1.0)
+
+    # Prepare input/output using existing logic
+    scaled_data = scaler.transform(raw_data)
+    X, Y = [], []
+    for t in range(len(scaled_data) - window_size):
+        window = scaled_data[t:t + window_size, :]
+        target = scaled_data[t + window_size, :STATE_COLS]
+        X.append(window.flatten())
+        Y.append(target)
+
+    X = torch.tensor(np.array(X), dtype=torch.float32).to(next(model.parameters()).device)
+    with torch.no_grad():
+        Y_pred = model(X).cpu().numpy()
+
+    # Pad and inverse-transform
+    def unscale(arr):
+        pad = np.zeros((arr.shape[0], CONTROL_COLS))
+        padded = np.hstack([arr, pad])
+        return scaler.inverse_transform(padded)[:, :STATE_COLS]
+
+    Y_true_unscaled = unscale(np.array(Y))
+    Y_pred_unscaled = unscale(Y_pred)
+
+    state_names = ['c', 'T_PM', 'd50', 'd90', 'd10', 'T_TM']
+
+    for i, state in enumerate(state_names):
+        plt.figure()
+        plt.plot(Y_true_unscaled[:, i], label="True")
+        plt.plot(Y_pred_unscaled[:, i], label="Predicted", linestyle="--")
+        plt.title(f"{state} - Cluster {cluster_id} - Run {run_id}")
+        plt.xlabel("Timestep")
+        plt.ylabel(state)
+        plt.legend()
+        plt.grid(True)
+        save_path = f"../results/{run_id}/state_{state}_cluster{cluster_id}.png"
+        plt.savefig(save_path)
+        plt.close()
 
 def evaluate_model(model, test_X, test_Y, run_id=None, cluster_id=None, scaler=None):
     model.eval()
@@ -138,8 +200,8 @@ def train_cluster(cluster_id, cluster_path, args, run_id):
     all_train_df = []
     for f in train_files:
         raw = np.loadtxt(f, skiprows=1)
-        # cleaned = clean_state_spikes(raw, z_thresh=3.5)
-        cleaned = raw
+        cleaned = clean_state_spikes(raw, z_thresh=1.0)
+        # cleaned = raw
         all_train_df.append(cleaned)
 
     # Fit scaler on cleaned training data
@@ -161,7 +223,7 @@ def train_cluster(cluster_id, cluster_path, args, run_id):
     test_Y = np.concatenate(all_test_Y, axis=0)
 
     model = get_model(input_size=(args.window_size * (STATE_COLS + CONTROL_COLS)), model_type=args.model, window_size=args.window_size).to(device)
-    criterion = get_loss()
+    criterion = get_loss(use_huber=True)
     optimizer = get_optimizer(model, lr=args.lr, use_adamw=True)
     
     if args.use_saved_model is not None:
@@ -170,24 +232,30 @@ def train_cluster(cluster_id, cluster_path, args, run_id):
             print(f"🔁 Using saved model from {model_path}")
             model.load_state_dict(torch.load(model_path, map_location=device))
             evaluate_model(model, test_X, test_Y, run_id=args.use_saved_model, cluster_id=cluster_id, scaler=scaler)
+            plot_sample_prediction(model, scaler, test_files, args.window_size, run_id=args.use_saved_model, cluster_id=cluster_id)
             return  # Exit early to skip training
         else:
             print(f"❌ Model file not found at {model_path}, proceeding to train a new model.")
-
-    if args.log_hyperparams:
-        log_hyperparams(run_id, args, cluster_id)
 
     train_losses, val_losses = [], []
     num_epochs = args.epochs
     
     best_val_loss = float('inf')
     epochs_without_improvement = 0
+    
+    train_X = np.concatenate(all_train_X, axis=0)
+    train_Y = np.concatenate(all_train_Y, axis=0)
+    Xtr, Xvl, ytr, yvl = train_test_split(train_X, train_Y, test_size=0.3, random_state=42)
+    
+    # train_loader = create_batches_custom(Xtr, ytr, args.batch_size)
+    # val_loader = create_batches_custom(Xvl, yvl, args.batch_size)
+    train_loader = DataLoader(NARXDataset(Xtr, ytr), batch_size=args.batch_size)
+    val_loader = DataLoader(NARXDataset(Xvl, yvl), batch_size=args.batch_size, shuffle=True)
 
     for epoch in range(num_epochs):
         model.train()
-        batches = create_batches(all_train_X, all_train_Y, args.batch_size)
         epoch_loss = 0
-        for x_batch, y_batch in batches:
+        for x_batch, y_batch in train_loader:
             x_batch, y_batch = x_batch.to(device), y_batch.to(device)
             optimizer.zero_grad()
             output = model(x_batch)
@@ -195,31 +263,36 @@ def train_cluster(cluster_id, cluster_path, args, run_id):
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
-        train_losses.append(epoch_loss / len(batches))
+        train_losses.append(epoch_loss / len(train_loader))
 
         model.eval()
         with torch.no_grad():
             val_loss = 0
-            for x_batch, y_batch in batches[:max(1, len(batches)//5)]:
+            for x_batch, y_batch in val_loader:
                 x_batch, y_batch = x_batch.to(device), y_batch.to(device)
                 pred = model(x_batch)
                 val_loss += criterion(pred, y_batch).item()
-            val_losses.append(val_loss / len(batches[:max(1, len(batches)//5)]))
+            val_losses.append(val_loss / len(val_loader))
 
         print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_losses[-1]:.4f}, Val Loss: {val_losses[-1]:.4f}")
         
         # Early stopping check
-        if val_losses[-1] < best_val_loss:
-            best_val_loss = val_losses[-1]
-            epochs_without_improvement = 0
-            best_model_state = model.state_dict()  # Save best model
-        else:
-            epochs_without_improvement += 1
-            if epochs_without_improvement >= args.early_stop_patience:
-                print(f"⏹️ Early stopping at epoch {epoch+1}. No improvement for {args.early_stop_patience} epochs.")
-                break
+        if args.early_stopping:
+            if val_losses[-1] < best_val_loss:
+                best_val_loss = val_losses[-1]
+                epochs_without_improvement = 0
+                best_model_state = model.state_dict()  # Save best model
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement >= args.early_stop_patience:
+                    print(f"⏹️ Early stopping at epoch {epoch+1}. No improvement for {args.early_stop_patience} epochs.")
+                    break
 
-    model.load_state_dict(best_model_state)
+    if args.early_stopping:
+        model.load_state_dict(best_model_state)
+    
+    if args.log_hyperparams:
+        log_hyperparams(run_id, args, cluster_id)
     
     if args.save_model:
         torch.save(model.state_dict(), f"../results/model_cluster{cluster_id}_run{run_id}.pt")
@@ -237,11 +310,12 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--window_size", type=int, default=5)
-    parser.add_argument("--model", choices=["ann", "lstm", "stacked_lstm"], default="ann")
+    parser.add_argument("--model", choices=["ann", "lstm", "stacked_lstm", "bilstm_attn"], default="ann")
     parser.add_argument("--log_scale", action="store_true")
     parser.add_argument("--log_hyperparams", action="store_true")
     parser.add_argument("--save_model", action="store_true")
     parser.add_argument("--use_saved_model", type=int, help="Use a saved model by run_id instead of training")
+    parser.add_argument("--early_stopping", action="store_true")
     parser.add_argument("--early_stop_patience", type=int, default=10, help="Patience for early stopping")
     args = parser.parse_args()
 
