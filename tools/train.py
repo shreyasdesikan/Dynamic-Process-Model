@@ -310,7 +310,7 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--window_size", type=int, default=5)
-    parser.add_argument("--model", choices=["ann", "lstm", "stacked_lstm", "bilstm_attn"], default="ann")
+    parser.add_argument("--model", choices=["ann", "lstm", "stacked_lstm", "bilstm_attn", "bilstm_multihead"], default="ann")
     parser.add_argument("--log_scale", action="store_true")
     parser.add_argument("--log_hyperparams", action="store_true")
     parser.add_argument("--save_model", action="store_true")
