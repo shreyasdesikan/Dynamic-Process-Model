@@ -29,7 +29,7 @@ use_saved_model: None
 early_stopping: False
 early_stop_patience: 10
 
-===== Run ID: 1750621902 | Cluster 0 ===== (new model)
+===== Run ID: 1750621902 | Cluster 0 ===== (new model bilstm_attn model)
 clusters: [0]
 train_all: False
 epochs: 100
@@ -44,7 +44,7 @@ use_saved_model: None
 early_stopping: False
 early_stop_patience: 10
 
-===== Run ID: 1750705836 | Cluster 0 =====
+===== Run ID: 1750705836 | Cluster 0 ===== (new model bilstm_multihead model)
 clusters: [0]
 train_all: False
 epochs: 100
@@ -58,3 +58,35 @@ save_model: True
 use_saved_model: None
 early_stopping: False
 early_stop_patience: 10
+
+===== Run ID: 1751299752 | Cluster 0 ===== (fixed code for scaling, added stacked zscore filtering, zthresh1 = 1.0, zthresh2 = 3.0, bilstm_multihead)
+clusters: [0]
+train_all: False
+epochs: 100
+lr: 0.001
+batch_size: 32
+window_size: 15
+model: bilstm_multihead
+log_scale: False
+log_hyperparams: True
+save_model: False
+use_saved_model: None
+early_stopping: False
+early_stop_patience: 10
+test_zscore_threshold: False
+
+===== Run ID: 1751300407 | Cluster 0 ===== (bilstm_multihead model with 30 epochs, optimal)
+clusters: [0]
+train_all: False
+epochs: 30
+lr: 0.001
+batch_size: 32
+window_size: 15
+model: bilstm_multihead
+log_scale: False
+log_hyperparams: True
+save_model: True
+use_saved_model: None
+early_stopping: False
+early_stop_patience: 10
+test_zscore_threshold: False

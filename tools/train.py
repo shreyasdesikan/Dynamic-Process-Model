@@ -26,26 +26,31 @@ class NARXDataset(Dataset):
     def __getitem__(self, idx):
         return self.X[idx], self.y[idx]
 
-def clean_state_spikes(data, z_thresh=3.0):
-    """Clean spikes in d50, d90, and d10 columns using z-score thresholding."""
-    cleaned = data.copy()
-    states = cleaned[:, :STATE_COLS]
-    target_indices = [2, 3, 4]  # d50, d90, d10
+def clean_state_spikes(data, z_thresh1=1.0, z_thresh2=3.0):
+    """Applies stacked Z-score filtering on d10, d50, d90 columns (indices 2, 3, 4)."""
+    def apply_zscore_filter(subset, z_thresh):
+        cleaned = subset.copy()
+        states = cleaned[:, :STATE_COLS]
+        for col in [2, 3, 4]:  # d50, d90, d10
+            col_data = states[:, col]
+            mean = np.mean(col_data)
+            std = np.std(col_data)
+            z = (col_data - mean) / std
+            spike_mask = np.abs(z) > z_thresh
+            cleaned[spike_mask, col] = mean
+        return cleaned
 
-    for i in target_indices:
-        col = states[:, i]
-        mean = np.mean(col)
-        std = np.std(col)
-        z_scores = (col - mean) / std
-        spike_mask = np.abs(z_scores) > z_thresh
-        mean_val = np.mean(col)
-        cleaned[spike_mask, i] = mean_val
+    # First pass
+    first_clean = apply_zscore_filter(data, z_thresh1)
+    # Second pass
+    second_clean = apply_zscore_filter(first_clean, z_thresh2)
 
-    return cleaned
+    return second_clean
 
 def load_batch_data(file_path, window_size, scaler=None):
-    df = np.loadtxt(file_path, skiprows=1)
-    scaled = scaler.transform(df) if scaler else df
+    raw = np.loadtxt(file_path, skiprows=1)
+    cleaned = clean_state_spikes(raw, z_thresh1=1.0, z_thresh2=3.0)
+    scaled = scaler.fit_transform(cleaned) if scaler else cleaned
 
     X, Y = [], []
     for t in range(len(scaled) - window_size):
@@ -84,7 +89,7 @@ def split_data(files, test_ratio=0.1, seed=42):
     return files[:split], files[split:]
 
 def log_hyperparams(run_id, args, cluster_id):
-    path = f"../results/hyperparams.txt"
+    path = f"../results/ann/hyperparams.txt"
     with open(path, "a") as f:
         f.write(f"\n===== Run ID: {run_id} | Cluster {cluster_id} =====\n")
         for k, v in vars(args).items():
@@ -103,20 +108,20 @@ def plot_losses(train_losses, val_losses, run_id=None, log_hyperparams=False, lo
     plt.legend()
     plt.grid(True)
     if log_hyperparams and run_id is not None:
-        plt.savefig(f"../results/loss_plot_run{run_id}.png")
+        plt.savefig(f"../results/ann/loss_plot_run{run_id}.png")
     else:
         plt.show()
     plt.close()
 
 def plot_sample_prediction(model, scaler, test_files, window_size, run_id, cluster_id):
-    os.makedirs(f"../results/{run_id}", exist_ok=True)
+    os.makedirs(f"../results/ann/{run_id}", exist_ok=True)
 
     # Pick a random test file
     sample_file = random.choice(test_files)
-    raw_data = clean_state_spikes(np.loadtxt(sample_file, skiprows=1), z_thresh=1.0)
+    raw_data = clean_state_spikes(np.loadtxt(sample_file, skiprows=1), z_thresh1=1.0, z_thresh2=3.0)
 
     # Prepare input/output using existing logic
-    scaled_data = scaler.transform(raw_data)
+    scaled_data = scaler.fit_transform(raw_data)
     X, Y = [], []
     for t in range(len(scaled_data) - window_size):
         window = scaled_data[t:t + window_size, :]
@@ -148,7 +153,7 @@ def plot_sample_prediction(model, scaler, test_files, window_size, run_id, clust
         plt.ylabel(state)
         plt.legend()
         plt.grid(True)
-        save_path = f"../results/{run_id}/state_{state}_cluster{cluster_id}.png"
+        save_path = f"../results/ann/{run_id}/state_{state}_cluster{cluster_id}.png"
         plt.savefig(save_path)
         plt.close()
 
@@ -181,7 +186,7 @@ def evaluate_model(model, test_X, test_Y, run_id=None, cluster_id=None, scaler=N
             print(f"{name}: {m:.6e}")
 
         if run_id is not None:
-            with open(f"../results/test_results_log.txt", "a") as f:
+            with open(f"../results/ann/test_results_log.txt", "a") as f:
                 f.write(f"Run ID: {run_id}, Cluster {cluster_id} - Test MSE (scaled):\n")
                 for name, m in zip(state_names, mse_scaled):
                     f.write(f"{name}: {m:.6e}\n")
@@ -190,29 +195,62 @@ def evaluate_model(model, test_X, test_Y, run_id=None, cluster_id=None, scaler=N
                     f.write(f"{name}: {m:.6e}\n")
                 f.write("\n")
 
+def zscore_threshold_trial(sample_file_path):
+    raw = np.loadtxt(sample_file_path, skiprows=1)
+    z_thresh1 = 1.0
+    z_thresh2 = 3.0
+
+    # First filter (always applied)
+    def apply_zscore_filter(data, z_thresh):
+        cleaned = data.copy()
+        for col in [2, 3, 4]:  # d50, d90, d10
+            col_data = cleaned[:, col]
+            mean = np.mean(col_data)
+            std = np.std(col_data)
+            z = (col_data - mean) / std
+            cleaned[np.abs(z) > z_thresh, col] = mean
+        return cleaned
+
+    # First and second pass
+    first_clean = apply_zscore_filter(raw.copy(), z_thresh=z_thresh1)
+    second_clean = apply_zscore_filter(first_clean.copy(), z_thresh=z_thresh2)
+
+    state_names = ['c', 'T_PM', 'd50', 'd90', 'd10', 'T_TM']
+
+    for idx, name in zip([2, 3, 4], ['d50', 'd90', 'd10']):
+        plt.figure(figsize=(10, 4))
+
+        plt.subplot(1, 2, 1)
+        plt.plot(first_clean[:, idx], label="After 1st Z-filter", color='blue')
+        plt.title(f"{name} after 1st Z-filter")
+        plt.grid()
+
+        plt.subplot(1, 2, 2)
+        plt.plot(second_clean[:, idx], label=f"After 2nd Z-filter (z={z_thresh2})", color='green')
+        plt.title(f"{name} after 2nd Z-filter")
+        plt.grid()
+
+        plt.suptitle(f"Z-Score Filtering on {name}")
+        plt.tight_layout()
+        plt.show()
+
+
 def train_cluster(cluster_id, cluster_path, args, run_id):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     all_files = [os.path.join(cluster_path, f) for f in os.listdir(cluster_path) if f.endswith(".txt")]
     train_files, test_files = split_data(all_files, test_ratio=0.1)
 
-    # Load and clean training data
-    all_train_df = []
-    for f in train_files:
-        raw = np.loadtxt(f, skiprows=1)
-        cleaned = clean_state_spikes(raw, z_thresh=1.0)
-        # cleaned = raw
-        all_train_df.append(cleaned)
-
-    # Fit scaler on cleaned training data
+    # Load cleaned and scaled train, test data
     scaler = MinMaxScaler()
-    scaler.fit(np.concatenate(all_train_df, axis=0))
 
     all_train_X, all_train_Y = [], []
     for file in train_files:
         X, Y = load_batch_data(file, args.window_size, scaler)
         all_train_X.append(X)
         all_train_Y.append(Y)
+    train_X = np.concatenate(all_train_X, axis=0)
+    train_Y = np.concatenate(all_train_Y, axis=0)
 
     all_test_X, all_test_Y = [], []
     for file in test_files:
@@ -227,7 +265,7 @@ def train_cluster(cluster_id, cluster_path, args, run_id):
     optimizer = get_optimizer(model, lr=args.lr, use_adamw=True)
     
     if args.use_saved_model is not None:
-        model_path = f"../results/model_cluster{cluster_id}_run{args.use_saved_model}.pt"
+        model_path = f"../results/ann/model_cluster{cluster_id}_run{args.use_saved_model}.pt"
         if os.path.exists(model_path):
             print(f"🔁 Using saved model from {model_path}")
             model.load_state_dict(torch.load(model_path, map_location=device))
@@ -243,8 +281,6 @@ def train_cluster(cluster_id, cluster_path, args, run_id):
     best_val_loss = float('inf')
     epochs_without_improvement = 0
     
-    train_X = np.concatenate(all_train_X, axis=0)
-    train_Y = np.concatenate(all_train_Y, axis=0)
     Xtr, Xvl, ytr, yvl = train_test_split(train_X, train_Y, test_size=0.3, random_state=42)
     
     # train_loader = create_batches_custom(Xtr, ytr, args.batch_size)
@@ -274,7 +310,7 @@ def train_cluster(cluster_id, cluster_path, args, run_id):
                 val_loss += criterion(pred, y_batch).item()
             val_losses.append(val_loss / len(val_loader))
 
-        print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_losses[-1]:.4f}, Val Loss: {val_losses[-1]:.4f}")
+        print(f"Epoch {epoch+1}/{num_epochs}, Train Loss: {train_losses[-1]:.6f}, Val Loss: {val_losses[-1]:.6f}")
         
         # Early stopping check
         if args.early_stopping:
@@ -295,7 +331,7 @@ def train_cluster(cluster_id, cluster_path, args, run_id):
         log_hyperparams(run_id, args, cluster_id)
     
     if args.save_model:
-        torch.save(model.state_dict(), f"../results/model_cluster{cluster_id}_run{run_id}.pt")
+        torch.save(model.state_dict(), f"../results/ann/model_cluster{cluster_id}_run{run_id}.pt")
 
     plot_losses(train_losses, val_losses, run_id=run_id, log_hyperparams=args.log_hyperparams,
                 log_scale=args.log_scale, model_type=args.model)
@@ -317,6 +353,7 @@ def main():
     parser.add_argument("--use_saved_model", type=int, help="Use a saved model by run_id instead of training")
     parser.add_argument("--early_stopping", action="store_true")
     parser.add_argument("--early_stop_patience", type=int, default=10, help="Patience for early stopping")
+    parser.add_argument("--test_zscore_threshold", action="store_true", help="Run Z-score threshold test and exit")
     args = parser.parse_args()
 
     base_path = "../Data/clustered"
@@ -326,6 +363,16 @@ def main():
         clusters = [int(folder.replace("cluster", "")) for folder in os.listdir(base_path) if folder.startswith("cluster")]
     else:
         clusters = args.clusters or []
+    
+    if args.test_zscore_threshold:
+        # Pick a random file from a known cluster (adjust path as needed)
+        cluster_0_path = os.path.join(base_path, "cluster0")
+        all_files = [os.path.join(cluster_0_path, f) for f in os.listdir(cluster_0_path) if f.endswith(".txt")]
+        sample_file = random.choice(all_files)
+
+        print(f"\n📊 Running Z-score trial on: {sample_file}")
+        zscore_threshold_trial(sample_file)
+        return
 
     for cluster_id in clusters:
         cluster_path = os.path.join(base_path, f"cluster{cluster_id}")
