@@ -5,7 +5,7 @@ import numpy as np
 import random
 import torch
 from torch.utils.data import Dataset, DataLoader
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.preprocessing import MinMaxScaler
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
 from models.ANN.narx_model import get_model, get_loss, get_optimizer
