@@ -69,43 +69,6 @@ def pinball_loss(predictions, targets, tau):
     errors = targets - predictions
     return torch.mean(torch.max(tau * errors, (tau - 1) * errors))
 
-def find_project_paths():
-    """Find model and data paths automatically"""
-    current = Path.cwd()
-    
-    # Search for project root by looking for Data directory
-    search_dirs = [current] + list(current.parents)
-    project_root = None
-    
-    for d in search_dirs:
-        if (d / 'Data' / 'clustered').exists():
-            project_root = d
-            break
-    
-    if not project_root:
-        raise FileNotFoundError("Could not find project root. Please run from within the project directory.")
-    
-    # Find model file
-    results_dir = project_root / 'results' / 'ann'
-    model_files = list(results_dir.glob('model_cluster0_run*.pt'))
-    
-    if not model_files:
-        raise FileNotFoundError(f"No model files found in {results_dir}")
-    
-    # Use the most recent model or the specified one
-    model_path = None
-    for f in model_files:
-        if 'run1751300407' in str(f):
-            model_path = f
-            break
-    
-    if not model_path:
-        model_path = sorted(model_files)[-1]  # Use most recent
-    
-    data_path = project_root / 'Data' / 'clustered' / 'cluster0'
-    
-    return str(model_path), str(data_path), str(results_dir)
-
 # ============= TASK 1: Generate Error Dataset and Train Quantile Regressors =============
 
 def generate_error_dataset(model, data_files, window_size, scaler, device):
@@ -262,8 +225,8 @@ def visualize_results(Y_true, Y_pred, lower_bounds, upper_bounds, scaler, save_d
     upper_uns = unscale(upper_bounds)
     
     # 1. Time series plots
-    n_samples = min(300, len(Y_true))
-    fig, axes = plt.subplots(3, 2, figsize=(15, 12))
+    n_samples = min(500, len(Y_true))
+    fig, axes = plt.subplots(6, 1, figsize=(15, 12))
     axes = axes.flatten()
     
     for i, (ax, state) in enumerate(zip(axes, state_names)):
@@ -355,8 +318,10 @@ def visualize_results(Y_true, Y_pred, lower_bounds, upper_bounds, scaler, save_d
 
 def main():
     """Run complete CQR pipeline"""
-    
-    model_path, data_path, results_dir = find_project_paths()
+        
+    model_path = "results/ann/model_cluster0_run1751300407.pt"
+    data_path = "Data/clustered/cluster0"
+    results_dir = "results/ann"
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")    
     window_size = 5
@@ -457,9 +422,9 @@ def main():
         'alpha': alpha
     }, save_path)
     
-    print(f"\n💾 CQR model saved to: {save_path}")
-    print("\n✅ CQR pipeline completed successfully!")
-    print(f"📊 Results saved in: {save_dir}")
+    print(f"\nCQR model saved to: {save_path}")
+    print("\nCQR pipeline completed successfully!")
+    print(f"Results saved in: {save_dir}")
 
 if __name__ == "__main__":
     main()
