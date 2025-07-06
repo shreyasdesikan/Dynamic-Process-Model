@@ -99,7 +99,7 @@ def generate_error_dataset(model, data_files, window_size, scaler):
     print(f"Generated {len(all_inputs)} error samples")
     return np.array(all_inputs), {k: np.array(v) for k, v in all_errors.items()}
 
-def train_quantile_regressor(inputs, errors, tau, epochs=50, batch_size=64, lr=1e-3):
+def train_quantile_regressor(inputs, errors, tau, epochs=80, batch_size=64, lr=1e-3):
     """Train a quantile regressor"""    
     dataset = ErrorDataset(inputs, errors)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -184,6 +184,59 @@ def compute_conformity_scores(model, quantile_models, cal_files, window_size, sc
 
 def plot_all_states_comparison(model, quantile_models, correction_factors, 
                               test_files, window_size, scaler, save_dir):
+    # --------- PART 1: Compute average coverage across all test files ---------
+    print("\nComputing average coverage across all test files...")
+    state_coverages = {name: {'uncal': [], 'cal': []} for name in STATE_NAMES}
+
+    for test_file in test_files:
+        X, Y = load_batch_data(test_file, window_size, scaler)
+        X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
+
+        for state_idx in range(STATE_COLS):
+            state_name = f'state_{state_idx}'
+            state_label = STATE_NAMES[state_idx]
+
+            n_points = min(300, len(X))
+            indices = np.linspace(0, len(X)-1, n_points, dtype=int)
+            X_subset = X_tensor[indices]
+            Y_subset = Y[indices, state_idx]
+
+            with torch.no_grad():
+                Y_pred_all = model(X_subset).cpu().numpy()
+                Y_pred = Y_pred_all[:, state_idx]
+                q_low = quantile_models[state_name]['low'](X_subset).cpu().squeeze().numpy()
+                q_high = quantile_models[state_name]['high'](X_subset).cpu().squeeze().numpy()
+
+                uncal_lower = Y_pred + q_low
+                uncal_upper = Y_pred + q_high
+                correction = correction_factors[state_name]
+                cal_lower = uncal_lower - correction
+                cal_upper = uncal_upper + correction
+
+            def unscale(arr):
+                dummy = np.zeros((len(arr), STATE_COLS + CONTROL_COLS))
+                dummy[:, state_idx] = arr
+                return scaler.inverse_transform(dummy)[:, state_idx]
+
+            Y_true_uns = unscale(Y_subset)
+            uncal_lower_uns = unscale(uncal_lower)
+            uncal_upper_uns = unscale(uncal_upper)
+            cal_lower_uns = unscale(cal_lower)
+            cal_upper_uns = unscale(cal_upper)
+
+            uncal_coverage = np.mean((Y_true_uns >= uncal_lower_uns) & (Y_true_uns <= uncal_upper_uns)) * 100
+            cal_coverage = np.mean((Y_true_uns >= cal_lower_uns) & (Y_true_uns <= cal_upper_uns)) * 100
+
+            state_coverages[state_label]['uncal'].append(uncal_coverage)
+            state_coverages[state_label]['cal'].append(cal_coverage)
+
+    print("\n--- Average Coverage over All Test Files ---")
+    for state, vals in state_coverages.items():
+        avg_uncal = np.mean(vals['uncal'])
+        avg_cal = np.mean(vals['cal'])
+        print(f"{state:6}: Uncalibrated {avg_uncal:.2f}% → CQR {avg_cal:.2f}%")
+
+    # --------- PART 2: Plotting for one file only (randomly selected) ---------
     # Pick a random test file
     random.seed(44)
     test_file = random.choice(test_files)
@@ -307,8 +360,8 @@ def main():
     
     # Load data files and split
     data_files = [os.path.join(data_path, f) for f in os.listdir(data_path) if f.endswith(".txt")]
-    train_files, temp_files = train_test_split(data_files, test_size=0.3, random_state=42)
-    cal_files, test_files = train_test_split(temp_files, test_size=0.5, random_state=42)
+    train_files, temp_files = train_test_split(data_files, test_size=0.2, random_state=44)
+    cal_files, test_files = train_test_split(temp_files, test_size=0.5, random_state=44)
     
     print(f"Training: {len(train_files)} files")
     print(f"Calibration: {len(cal_files)} files")
