@@ -153,6 +153,50 @@ class BidirectionalLSTMWithMultiHead(nn.Module):
 
         # Concatenate in correct order
         return torch.cat([out_ctpm, out_dxyz, out_ttm], dim=1)
+    
+class StackedLSTMHuber(nn.Module):
+    def __init__(self, input_dim=13, output_dim=6, window_size=10):
+        super(StackedLSTMHuber, self).__init__()
+        self.window_size = window_size
+        self.input_dim = input_dim
+
+        self.lstm1 = nn.LSTM(input_size=input_dim, hidden_size=256, batch_first=True, dropout=0.0, bidirectional=False)
+        self.bn1 = nn.BatchNorm1d(window_size)
+        self.drop1 = nn.Dropout(0.3)
+
+        self.lstm2 = nn.LSTM(input_size=256, hidden_size=128, batch_first=True, dropout=0.0, bidirectional=False)
+        self.bn2 = nn.BatchNorm1d(window_size)
+        self.drop2 = nn.Dropout(0.3)
+
+        self.lstm3 = nn.LSTM(input_size=128, hidden_size=64, batch_first=True, dropout=0.0, bidirectional=False)
+        self.bn3 = nn.BatchNorm1d(64)
+
+        self.fc1 = nn.Linear(64, 32)
+        self.fc2 = nn.Linear(32, output_dim)
+
+    def forward(self, x):
+        # x: (batch, n_steps * input_dim)
+        batch_size, flat_len = x.size()
+        assert flat_len % self.input_dim == 0, f"Input cannot be reshaped to (batch, ?, {self.input_dim})"
+        inferred_steps = flat_len // self.input_dim
+        x = x.view(batch_size, inferred_steps, self.input_dim)
+
+        x, _ = self.lstm1(x)
+        x = self.bn1(x)
+        x = self.drop1(x)
+
+        x, _ = self.lstm2(x)
+        x = self.bn2(x)
+        x = self.drop2(x)
+
+        x, _ = self.lstm3(x)  # Output shape: (batch, n_steps, 64)
+        x = x[:, -1, :]       # Take last timestep output → shape: (batch, 64)
+        x = self.bn3(x)
+
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)  # Output: (batch, 6)
+
+        return x
 
 
 def get_model(input_size=65, model_type="ann", window_size=5):
@@ -164,6 +208,8 @@ def get_model(input_size=65, model_type="ann", window_size=5):
         return BidirectionalLSTMWithAttention(input_dim=13, output_dim=6)
     elif model_type == "bilstm_multihead":
         return BidirectionalLSTMWithMultiHead()
+    elif model_type == "stacked_lstm_reg":
+        return StackedLSTMHuber(input_dim=13, output_dim=6, window_size=window_size)
     else:
         return SimpleANNModel(input_size=input_size)
 

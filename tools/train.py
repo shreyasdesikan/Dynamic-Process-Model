@@ -7,9 +7,11 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.model_selection import train_test_split
+from scipy.signal import butter, filtfilt
 import matplotlib.pyplot as plt
 from models.ANN.narx_model import get_model, get_loss, get_optimizer
 
+STATE_NAMES = ['c', 'T_PM', 'd50', 'd90', 'd10', 'T_TM']
 STATE_COLS = 6
 CONTROL_COLS = 7
 
@@ -26,7 +28,7 @@ class NARXDataset(Dataset):
     def __getitem__(self, idx):
         return self.X[idx], self.y[idx]
 
-def clean_state_spikes(data, z_thresh1=1.0, z_thresh2=3.0):
+def clean_and_filter(data, z_thresh1=1.0, z_thresh2=3.0, cutoff=0.1, test=False):
     """Applies stacked Z-score filtering on d10, d50, d90 columns (indices 2, 3, 4)."""
     def apply_zscore_filter(subset, z_thresh):
         cleaned = subset.copy()
@@ -42,14 +44,23 @@ def clean_state_spikes(data, z_thresh1=1.0, z_thresh2=3.0):
 
     # First pass
     first_clean = apply_zscore_filter(data, z_thresh1)
+    
     # Second pass
     second_clean = apply_zscore_filter(first_clean, z_thresh2)
+    
+    if test:
+        return None, None, second_clean
+    
+    lowpass_filtered = second_clean.copy()
+    b, a = butter(N=2, Wn=cutoff, btype='low', fs=1.0)
+    for col in range(6):  # STATE_COLS = 6
+        lowpass_filtered[:, col] = filtfilt(b, a, second_clean[:, col])
 
-    return second_clean
+    return first_clean, second_clean, lowpass_filtered
 
-def load_batch_data(file_path, window_size, scaler=None):
+def load_batch_data(file_path, window_size, scaler=None, test=False):
     raw = np.loadtxt(file_path, skiprows=1)
-    cleaned = clean_state_spikes(raw, z_thresh1=1.0, z_thresh2=3.0)
+    _1, _2, cleaned = clean_and_filter(raw, z_thresh1=1.0, z_thresh2=3.0, cutoff=0.1, test=test)
     scaled = scaler.fit_transform(cleaned) if scaler else cleaned
 
     X, Y = [], []
@@ -118,10 +129,10 @@ def plot_sample_prediction(model, scaler, test_files, window_size, run_id, clust
 
     # Pick a random test file
     sample_file = random.choice(test_files)
-    raw_data = clean_state_spikes(np.loadtxt(sample_file, skiprows=1), z_thresh1=1.0, z_thresh2=3.0)
+    _, second_zthresh, cleaned_data = clean_and_filter(np.loadtxt(sample_file, skiprows=1), z_thresh1=1.0, z_thresh2=3.0, cutoff=0.1, test=False)
 
     # Prepare input/output using existing logic
-    scaled_data = scaler.fit_transform(raw_data)
+    scaled_data = scaler.fit_transform(cleaned_data)
     X, Y = [], []
     for t in range(len(scaled_data) - window_size):
         window = scaled_data[t:t + window_size, :]
@@ -146,7 +157,8 @@ def plot_sample_prediction(model, scaler, test_files, window_size, run_id, clust
 
     for i, state in enumerate(state_names):
         plt.figure()
-        plt.plot(Y_true_unscaled[:, i], label="True")
+        plt.plot(second_zthresh[:, i], label="Unfiltered")
+        # plt.plot(Y_true_unscaled[:, i], label="True")
         plt.plot(Y_pred_unscaled[:, i], label="Predicted", linestyle="--")
         plt.title(f"{state} - Cluster {cluster_id} - Run {run_id}")
         plt.xlabel("Timestep")
@@ -195,10 +207,102 @@ def evaluate_model(model, test_X, test_Y, run_id=None, cluster_id=None, scaler=N
                     f.write(f"{name}: {m:.6e}\n")
                 f.write("\n")
 
-def zscore_threshold_trial(sample_file_path):
+def predict_open_loop(model, test_X, test_Y, window_size=5, input_dim=13, device='cpu', scaler=None, run_id=None):
+    """
+    Performs open-loop prediction and reports per-state metrics.
+
+    Parameters:
+    - model: Trained model
+    - initial_window: (window_size, 13) numpy array of recent scaled [state+control]
+    - windows_per_file: Number of windows to predict in each file
+    - window_size: Size of the sliding input window
+    - device: Device to run on
+    - scaler: Optional scaler to inverse-transform predictions
+    - run_id, cluster_id: Optional logging identifiers
+
+    Returns:
+    - preds_all: (steps, 6) numpy array of predicted state values
+    """
+    
+    model.eval()
+    with torch.no_grad():
+        total_steps = test_X.shape[0]
+        windows_per_file = 1000 - window_size
+        num_files = total_steps // windows_per_file
+
+        # Reshape test_X and test_Y by file
+        test_X_files = test_X.reshape(num_files, windows_per_file, -1)
+        test_Y_files = test_Y.reshape(num_files, windows_per_file, -1)
+
+        mse_list = []
+        mae_list = []
+
+        for file_idx in range(num_files):
+            file_X = test_X_files[file_idx]  # (windows_per_file, input_dim * window_size)
+            file_Y = test_Y_files[file_idx]  # (windows_per_file, output_dim)
+            
+            current_window = file_X[0].copy().reshape(1, -1)  # shape: (1, window_size * input_dim)
+            preds = []
+            
+            for step in range(windows_per_file):
+                # Predict next state
+                input_tensor = torch.tensor(current_window, dtype=torch.float32).to(device)
+                pred = model(input_tensor).cpu().numpy()[0]  # shape: (output_dim,)
+                preds.append(pred)
+
+                if step + 1 >= windows_per_file:
+                    break  # No further window possible
+
+                # Prepare next window:
+                current_window_matrix = current_window.reshape(window_size, input_dim)
+
+                # Slide: remove first row, add new row
+                next_window_matrix = np.zeros_like(current_window_matrix)
+                next_window_matrix[:-1] = current_window_matrix[1:]  # shift
+
+                # Combine predicted state with original control inputs from next timestep
+                next_controls = file_X[step + 1].reshape(window_size, input_dim)[-1, 6:]  # last timestep inputs
+                new_row = np.concatenate([pred, next_controls])
+                next_window_matrix[-1] = new_row
+
+                # Flatten for next iteration
+                current_window = next_window_matrix.reshape(1, -1)
+
+            preds_np = np.array(preds)
+            targets_np = file_Y[:len(preds)]
+
+            # Inverse transform predictions and targets
+            preds_unscaled = scaler.inverse_transform(
+                np.hstack([preds_np, np.zeros((preds_np.shape[0], input_dim - preds_np.shape[1]))])
+            )[:, :preds_np.shape[1]]
+
+            targets_unscaled = scaler.inverse_transform(
+                np.hstack([targets_np, np.zeros((targets_np.shape[0], input_dim - targets_np.shape[1]))])
+            )[:, :targets_np.shape[1]]
+
+            mse = np.mean((preds_unscaled - targets_unscaled) ** 2, axis=0)
+            mae = np.mean(np.abs(preds_unscaled - targets_unscaled), axis=0)
+
+            mse_list.append(mse)
+            mae_list.append(mae)
+
+        avg_mse = np.mean(mse_list, axis=0)
+        avg_mae = np.mean(mae_list, axis=0)
+
+        state_names = ['c', 'T_PM', 'd50', 'd90', 'd10', 'T_TM']
+
+        print(f"\nAverage Test MSE and MAE per State (Open Loop, Run ID: {run_id}):")
+        for i, state in enumerate(state_names):
+            print(f"{state:>5s} | MSE: {avg_mse[i]:.6e}, MAE: {avg_mae[i]:.6e}")
+
+        with open("../results/ann/test_results_log.txt", "a") as f:
+            f.write(f"\nAverage Test MSE and MAE per State (Open Loop, Run ID: {run_id}):\n")
+            for i, state in enumerate(state_names):
+                f.write(f"{state:>5s} | MSE: {avg_mse[i]:.6e}, MAE: {avg_mae[i]:.6e}\n")
+            f.write("\n")
+
+def zscore_filter_trial(sample_file_path, z_thresh1=1.0, z_thresh2=3.0, cutoff=0.1):
     raw = np.loadtxt(sample_file_path, skiprows=1)
-    z_thresh1 = 1.0
-    z_thresh2 = 3.0
 
     # First filter (always applied)
     def apply_zscore_filter(data, z_thresh):
@@ -214,23 +318,43 @@ def zscore_threshold_trial(sample_file_path):
     # First and second pass
     first_clean = apply_zscore_filter(raw.copy(), z_thresh=z_thresh1)
     second_clean = apply_zscore_filter(first_clean.copy(), z_thresh=z_thresh2)
+    
+    # lowpass_filtered = first_clean.copy()
+    # b, a = butter(N=2, Wn=cutoff, btype='low', fs=1.0)
+    # for col in range(6):  # STATE_COLS = 6
+    #     lowpass_filtered[:, col] = filtfilt(b, a, first_clean[:, col])
+    
+    lowpass_filtered = second_clean.copy()
+    b, a = butter(N=2, Wn=cutoff, btype='low', fs=1.0)
+    for col in range(6):  # STATE_COLS = 6
+        lowpass_filtered[:, col] = filtfilt(b, a, second_clean[:, col])
 
     state_names = ['c', 'T_PM', 'd50', 'd90', 'd10', 'T_TM']
 
-    for idx, name in zip([2, 3, 4], ['d50', 'd90', 'd10']):
+    for idx, name in enumerate(state_names): # zip([2, 3, 4], ['d50', 'd90', 'd10'])
         plt.figure(figsize=(10, 4))
-
-        plt.subplot(1, 2, 1)
-        plt.plot(first_clean[:, idx], label="After 1st Z-filter", color='blue')
-        plt.title(f"{name} after 1st Z-filter")
+        
+        plt.subplot(2, 2, 1)
+        plt.plot(raw[:, idx], label="Raw", color='red')
+        plt.title(f"{name} raw")
+        plt.grid()
+        
+        plt.subplot(2, 2, 2)
+        plt.plot(first_clean[:, idx], label="After Z-filter 1", color='blue')
+        plt.title(f"{name} after Z-filter 1")
         plt.grid()
 
-        plt.subplot(1, 2, 2)
-        plt.plot(second_clean[:, idx], label=f"After 2nd Z-filter (z={z_thresh2})", color='green')
-        plt.title(f"{name} after 2nd Z-filter")
+        plt.subplot(2, 2, 3)
+        plt.plot(second_clean[:, idx], label="After Z-filter 2", color='purple')
+        plt.title(f"{name} after Z-filter 2")
         plt.grid()
 
-        plt.suptitle(f"Z-Score Filtering on {name}")
+        plt.subplot(2, 2, 4)
+        plt.plot(lowpass_filtered[:, idx], label=f"After smoothing filter (cutoff={cutoff})", color='green')
+        plt.title(f"{name} after smooth filter")
+        plt.grid()
+
+        plt.suptitle(f"Z-Score and Smooth Filtering on {name}")
         plt.tight_layout()
         plt.show()
 
@@ -254,7 +378,7 @@ def train_cluster(cluster_id, cluster_path, args, run_id):
 
     all_test_X, all_test_Y = [], []
     for file in test_files:
-        X, Y = load_batch_data(file, args.window_size, scaler)
+        X, Y = load_batch_data(file, args.window_size, scaler, test=False)
         all_test_X.append(X)
         all_test_Y.append(Y)
     test_X = np.concatenate(all_test_X, axis=0)
@@ -264,14 +388,24 @@ def train_cluster(cluster_id, cluster_path, args, run_id):
     criterion = get_loss(use_huber=True)
     optimizer = get_optimizer(model, lr=args.lr, use_adamw=True)
     
-    if args.use_saved_model is not None:
-        model_path = f"../results/ann/model_cluster{cluster_id}_run{args.use_saved_model}.pt"
+    if args.test_saved_model is not None:
+        model_path = f"../results/ann/model_cluster{cluster_id}_run{args.test_saved_model}.pt"
         if os.path.exists(model_path):
             print(f"🔁 Using saved model from {model_path}")
             model.load_state_dict(torch.load(model_path, map_location=device))
-            evaluate_model(model, test_X, test_Y, run_id=args.use_saved_model, cluster_id=cluster_id, scaler=scaler)
-            plot_sample_prediction(model, scaler, test_files, args.window_size, run_id=args.use_saved_model, cluster_id=cluster_id)
+            evaluate_model(model, test_X, test_Y, run_id=args.test_saved_model, cluster_id=cluster_id, scaler=scaler)
+            plot_sample_prediction(model, scaler, test_files, args.window_size, run_id=args.test_saved_model, cluster_id=cluster_id)
             return  # Exit early to skip training
+        else:
+            print(f"❌ Model file not found at {model_path}, proceeding to train a new model.")
+    
+    if args.open_loop_run is not None:
+        model_path = f"../results/ann/model_cluster{cluster_id}_run{args.open_loop_run}.pt"
+        if os.path.exists(model_path):
+            print(f"🔁 Using saved model from {model_path}")
+            model.load_state_dict(torch.load(model_path, map_location=device))
+            predict_open_loop(model, test_X, test_Y, window_size=args.window_size, input_dim=CONTROL_COLS+STATE_COLS, device=device, scaler=scaler, run_id=args.open_loop_run)
+            return
         else:
             print(f"❌ Model file not found at {model_path}, proceeding to train a new model.")
 
@@ -346,32 +480,33 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--window_size", type=int, default=5)
-    parser.add_argument("--model", choices=["ann", "lstm", "stacked_lstm", "bilstm_attn", "bilstm_multihead"], default="ann")
+    parser.add_argument("--model", choices=["ann", "lstm", "stacked_lstm", "stacked_lstm_reg", "bilstm_attn", "bilstm_multihead"], default="ann")
     parser.add_argument("--log_scale", action="store_true")
     parser.add_argument("--log_hyperparams", action="store_true")
     parser.add_argument("--save_model", action="store_true")
-    parser.add_argument("--use_saved_model", type=int, help="Use a saved model by run_id instead of training")
+    parser.add_argument("--test_saved_model", type=int, help="Use a saved model by run_id instead of training")
+    parser.add_argument("--open_loop_run", type=int, help="Run ID of model to use for open loop prediction")
     parser.add_argument("--early_stopping", action="store_true")
     parser.add_argument("--early_stop_patience", type=int, default=10, help="Patience for early stopping")
-    parser.add_argument("--test_zscore_threshold", action="store_true", help="Run Z-score threshold test and exit")
+    parser.add_argument("--test_zscore_filter", action="store_true", help="Run Z-score threshold test and exit")
     args = parser.parse_args()
 
     base_path = "../Data/clustered"
-    run_id = args.use_saved_model if args.use_saved_model is not None else int(time.time())
+    run_id = args.test_saved_model if args.test_saved_model is not None else int(time.time())
 
     if args.train_all:
         clusters = [int(folder.replace("cluster", "")) for folder in os.listdir(base_path) if folder.startswith("cluster")]
     else:
         clusters = args.clusters or []
     
-    if args.test_zscore_threshold:
+    if args.test_zscore_filter:
         # Pick a random file from a known cluster (adjust path as needed)
         cluster_0_path = os.path.join(base_path, "cluster0")
         all_files = [os.path.join(cluster_0_path, f) for f in os.listdir(cluster_0_path) if f.endswith(".txt")]
         sample_file = random.choice(all_files)
 
         print(f"\n📊 Running Z-score trial on: {sample_file}")
-        zscore_threshold_trial(sample_file)
+        zscore_filter_trial(sample_file)
         return
 
     for cluster_id in clusters:
