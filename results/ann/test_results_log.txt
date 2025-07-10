@@ -450,3 +450,33 @@ Average Test MSE and MAE per State (Open Loop, Run ID: 1751974461):
   d10 | MSE: 1.397898e-09, MAE: 2.758767e-05
  T_TM | MSE: 4.321999e+00, MAE: 1.209764e+00
 
+Run ID: 1752146723, Cluster 1 - Test MSE (scaled):
+c: 4.139764e-04
+T_PM: 3.223680e-04
+d50: 3.947885e-04
+d90: 4.717905e-04
+d10: 3.955980e-04
+T_TM: 3.732015e-04
+Run ID: 1752146723, Cluster 1 - Test MSE (unscaled):
+c: 2.121087e-07
+T_PM: 1.223540e-01
+d50: 2.190467e-11
+d90: 3.162630e-11
+d10: 1.913713e-11
+T_TM: 1.413073e-01
+
+Run ID: 1752146723, Cluster 1 - Test MSE (scaled):
+c: 4.139764e-04
+T_PM: 3.223680e-04
+d50: 3.947885e-04
+d90: 4.717905e-04
+d10: 3.955980e-04
+T_TM: 3.732015e-04
+Run ID: 1752146723, Cluster 1 - Test MSE (unscaled):
+c: 2.121087e-07
+T_PM: 1.223540e-01
+d50: 2.190467e-11
+d90: 3.162630e-11
+d10: 1.913713e-11
+T_TM: 1.413073e-01
+
