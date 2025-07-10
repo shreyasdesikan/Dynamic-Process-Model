@@ -11,14 +11,13 @@ from sklearn.preprocessing import MinMaxScaler
 from pathlib import Path
 import random
 
-# Fix import paths - add parent directories to Python path
 current_dir = Path(__file__).parent
-project_root = current_dir.parent.parent  # Go up to project root
+project_root = current_dir.parent.parent
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / 'tools'))
 
 from models.ANN.narx_model import get_model
-from train import load_batch_data, clean_state_spikes
+from train import load_batch_data, clean_and_filter
 
 
 CONTROL_COLS = 7
@@ -70,11 +69,16 @@ def pinball_loss(predictions, targets, tau):
     )
     return torch.mean(loss)
 
+def unscale_state_values(arr, state_idx, scaler):
+    dummy = np.zeros((len(arr), STATE_COLS + CONTROL_COLS))
+    dummy[:, state_idx] = arr
+    return scaler.inverse_transform(dummy)[:, state_idx]
+
+
 # ============= TASK 1: Generate Error Dataset and Train Quantile Regressors =============
 
 def generate_error_dataset(model, data_files, window_size, scaler):
-    """Generate error dataset from trained model"""
-    print("\nTask 1: Generating error dataset...")
+    print("\nTask 1: Generating error dataset")
     
     model.eval()
     all_inputs = []
@@ -99,8 +103,7 @@ def generate_error_dataset(model, data_files, window_size, scaler):
     print(f"Generated {len(all_inputs)} error samples")
     return np.array(all_inputs), {k: np.array(v) for k, v in all_errors.items()}
 
-def train_quantile_regressor(inputs, errors, tau, epochs=80, batch_size=64, lr=1e-3):
-    """Train a quantile regressor"""    
+def train_quantile_regressor(inputs, errors, tau, epochs=40, batch_size=64, lr=1e-3):
     dataset = ErrorDataset(inputs, errors)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     
@@ -131,8 +134,7 @@ def train_quantile_regressor(inputs, errors, tau, epochs=80, batch_size=64, lr=1
 # ============= TASK 2: Conformalize Prediction Intervals =============
 
 def compute_conformity_scores(model, quantile_models, cal_files, window_size, scaler):
-    """Compute conformity scores on calibration data"""
-    print("\nTask 2: Computing conformity scores...")
+    print("\nTask 2: Computing conformity scores")
     
     conformity_scores = {f'state_{i}': [] for i in range(STATE_COLS)}
     
@@ -182,133 +184,124 @@ def compute_conformity_scores(model, quantile_models, cal_files, window_size, sc
 
 # ============= TASK 3: Analyze and Visualize Performance =============
 
-def plot_all_states_comparison(model, quantile_models, correction_factors, 
-                              test_files, window_size, scaler, save_dir):
-    # --------- PART 1: Compute average coverage across all test files ---------
-    print("\nComputing average coverage across all test files...")
-    state_coverages = {name: {'uncal': [], 'cal': []} for name in STATE_NAMES}
+def compute_all_predictions_and_coverage(model, quantile_models, correction_factors, test_files, window_size, scaler):
+    print("\nComputing predictions and coverage for all test files")
 
-    for test_file in test_files:
+    # Store all computed results
+    all_results = []
+    
+    for file_idx, test_file in enumerate(test_files):
+        print(f"Processing file {file_idx + 1}/{len(test_files)}: {os.path.basename(test_file)}")
+        
         X, Y = load_batch_data(test_file, window_size, scaler)
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
-
+        
+        # Store results for this file
+        file_results = {
+            'filename': test_file,
+            'states': {}
+        }
+        
         for state_idx in range(STATE_COLS):
             state_name = f'state_{state_idx}'
             state_label = STATE_NAMES[state_idx]
 
+            # Sample subset for efficiency
             n_points = min(300, len(X))
             indices = np.linspace(0, len(X)-1, n_points, dtype=int)
             X_subset = X_tensor[indices]
             Y_subset = Y[indices, state_idx]
 
             with torch.no_grad():
+                # Get predictions and quantiles
                 Y_pred_all = model(X_subset).cpu().numpy()
                 Y_pred = Y_pred_all[:, state_idx]
                 q_low = quantile_models[state_name]['low'](X_subset).cpu().squeeze().numpy()
                 q_high = quantile_models[state_name]['high'](X_subset).cpu().squeeze().numpy()
 
+                # Compute intervals
                 uncal_lower = Y_pred + q_low
                 uncal_upper = Y_pred + q_high
                 correction = correction_factors[state_name]
                 cal_lower = uncal_lower - correction
                 cal_upper = uncal_upper + correction
 
-            def unscale(arr):
-                dummy = np.zeros((len(arr), STATE_COLS + CONTROL_COLS))
-                dummy[:, state_idx] = arr
-                return scaler.inverse_transform(dummy)[:, state_idx]
+            # Unscale everything
+            Y_true_uns = unscale_state_values(Y_subset, state_idx, scaler)
+            Y_pred_uns = unscale_state_values(Y_pred, state_idx, scaler)
+            uncal_lower_uns = unscale_state_values(uncal_lower, state_idx, scaler)
+            uncal_upper_uns = unscale_state_values(uncal_upper, state_idx, scaler)
+            cal_lower_uns = unscale_state_values(cal_lower, state_idx, scaler)
+            cal_upper_uns = unscale_state_values(cal_upper, state_idx, scaler)
 
-            Y_true_uns = unscale(Y_subset)
-            uncal_lower_uns = unscale(uncal_lower)
-            uncal_upper_uns = unscale(uncal_upper)
-            cal_lower_uns = unscale(cal_lower)
-            cal_upper_uns = unscale(cal_upper)
-
+            # Calculate coverage
             uncal_coverage = np.mean((Y_true_uns >= uncal_lower_uns) & (Y_true_uns <= uncal_upper_uns)) * 100
             cal_coverage = np.mean((Y_true_uns >= cal_lower_uns) & (Y_true_uns <= cal_upper_uns)) * 100
 
-            state_coverages[state_label]['uncal'].append(uncal_coverage)
-            state_coverages[state_label]['cal'].append(cal_coverage)
+            # Store all computed results for the state
+            file_results['states'][state_idx] = {
+                'state_name': state_name,
+                'state_label': state_label,
+                'n_points': n_points,
+                'Y_true_uns': Y_true_uns,
+                'Y_pred_uns': Y_pred_uns,
+                'uncal_lower_uns': uncal_lower_uns,
+                'uncal_upper_uns': uncal_upper_uns,
+                'cal_lower_uns': cal_lower_uns,
+                'cal_upper_uns': cal_upper_uns,
+                'uncal_coverage': uncal_coverage,
+                'cal_coverage': cal_coverage
+            }
+        
+        all_results.append(file_results)
 
     print("\n--- Average Coverage over All Test Files ---")
-    for state, vals in state_coverages.items():
-        avg_uncal = np.mean(vals['uncal'])
-        avg_cal = np.mean(vals['cal'])
-        print(f"{state:6}: Uncalibrated {avg_uncal:.2f}% → CQR {avg_cal:.2f}%")
-
-    # --------- PART 2: Plotting for one file only (randomly selected) ---------
-    # Pick a random test file
-    random.seed(44)
-    test_file = random.choice(test_files)
-    print(f"Selected test file: {os.path.basename(test_file)}")
-    
-    # Load the selected file
-    X, Y = load_batch_data(test_file, window_size, scaler)
-    X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
-    
-    # Process each state
     for state_idx in range(STATE_COLS):
-        state_name = f'state_{state_idx}'
+        state_label = STATE_NAMES[state_idx]
+        uncal_coverages = [result['states'][state_idx]['uncal_coverage'] for result in all_results]
+        cal_coverages = [result['states'][state_idx]['cal_coverage'] for result in all_results]
+        avg_uncal = np.mean(uncal_coverages)
+        avg_cal = np.mean(cal_coverages)
+        print(f"{state_label:6}: Uncalibrated {avg_uncal:.2f}% → CQR {avg_cal:.2f}%")
+
+    return all_results
+
+def plot_selected_file_results(selected_results, save_dir):
+    filename = selected_results['filename']
+    print(f"\nCreating plots for: {os.path.basename(filename)}")
+    
+    for state_idx in range(STATE_COLS):
+        state_data = selected_results['states'][state_idx]
+        state_label = state_data['state_label']
         
-        print(f"\nProcessing {STATE_NAMES[state_idx]}...")
+        print(f"Plotting {state_label}...")
         
-        # Use 300 points for clarity
-        n_points = min(300, len(X))
-        indices = np.linspace(0, len(X)-1, n_points, dtype=int)
-        
-        X_subset = X_tensor[indices]
-        Y_subset = Y[indices, state_idx]
-        
-        with torch.no_grad():
-            # Get predictions
-            Y_pred_all = model(X_subset).cpu().numpy()
-            Y_pred = Y_pred_all[:, state_idx]
-            
-            # Get quantile predictions
-            q_low = quantile_models[state_name]['low'](X_subset).cpu().squeeze().numpy()
-            q_high = quantile_models[state_name]['high'](X_subset).cpu().squeeze().numpy()
-            
-            # Uncalibrated intervals
-            uncal_lower = Y_pred + q_low
-            uncal_upper = Y_pred + q_high
-            
-            # Calibrated intervals
-            correction = correction_factors[state_name]
-            cal_lower = Y_pred + q_low - correction
-            cal_upper = Y_pred + q_high + correction
-        
-        # Unscale for visualization
-        def unscale_state(arr, state_idx):
-            dummy = np.zeros((len(arr), STATE_COLS + CONTROL_COLS))
-            dummy[:, state_idx] = arr
-            unscaled = scaler.inverse_transform(dummy)
-            return unscaled[:, state_idx]
-        
-        Y_true_uns = unscale_state(Y_subset, state_idx)
-        Y_pred_uns = unscale_state(Y_pred, state_idx)
-        uncal_lower_uns = unscale_state(uncal_lower, state_idx)
-        uncal_upper_uns = unscale_state(uncal_upper, state_idx)
-        cal_lower_uns = unscale_state(cal_lower, state_idx)
-        cal_upper_uns = unscale_state(cal_upper, state_idx)
+        # Extract data
+        n_points = state_data['n_points']
+        Y_true_uns = state_data['Y_true_uns']
+        Y_pred_uns = state_data['Y_pred_uns']
+        uncal_lower_uns = state_data['uncal_lower_uns']
+        uncal_upper_uns = state_data['uncal_upper_uns']
+        cal_lower_uns = state_data['cal_lower_uns']
+        cal_upper_uns = state_data['cal_upper_uns']
+        uncal_coverage = state_data['uncal_coverage']
+        cal_coverage = state_data['cal_coverage']
         
         # Create figure with 3 subplots
         fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
-        
-        # Use time steps for x-axis
         x_plot = np.arange(n_points)
         
         # Plot 1: Mean Prediction Only
         ax1.scatter(x_plot, Y_true_uns, c='black', s=20, alpha=0.6, label='Data')
         ax1.plot(x_plot, Y_pred_uns, 'b-', linewidth=2, label='Mean prediction')
         ax1.set_xlabel('Time Step')
-        ax1.set_ylabel(STATE_NAMES[state_idx])
+        ax1.set_ylabel(state_label)
         ax1.set_title('Mean Prediction Only')
         ax1.legend()
         ax1.grid(True, alpha=0.3)
         
         # Plot 2: Uncalibrated QR
         uncal_inside = (Y_true_uns >= uncal_lower_uns) & (Y_true_uns <= uncal_upper_uns)
-        uncal_coverage = np.mean(uncal_inside) * 100
         
         ax2.scatter(x_plot[uncal_inside], Y_true_uns[uncal_inside], 
                    c='blue', s=20, alpha=0.6, label='Inside interval')
@@ -317,16 +310,14 @@ def plot_all_states_comparison(model, quantile_models, correction_factors,
         ax2.plot(x_plot, Y_pred_uns, 'b-', linewidth=2, label='Mean prediction')
         ax2.fill_between(x_plot, uncal_lower_uns, uncal_upper_uns, 
                         alpha=0.2, color='blue', label='Uncalibrated QR')
-        
         ax2.set_xlabel('Time Step')
-        ax2.set_ylabel(STATE_NAMES[state_idx])
+        ax2.set_ylabel(state_label)
         ax2.set_title(f'QR - Uncalibrated - Coverage: {uncal_coverage:.2f}%')
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         
         # Plot 3: CQR (Calibrated)
         cal_inside = (Y_true_uns >= cal_lower_uns) & (Y_true_uns <= cal_upper_uns)
-        cal_coverage = np.mean(cal_inside) * 100
         
         ax3.scatter(x_plot[cal_inside], Y_true_uns[cal_inside], 
                    c='green', s=20, alpha=0.6, label='Inside interval')
@@ -335,32 +326,29 @@ def plot_all_states_comparison(model, quantile_models, correction_factors,
         ax3.plot(x_plot, Y_pred_uns, 'g-', linewidth=2, label='Mean prediction')
         ax3.fill_between(x_plot, cal_lower_uns, cal_upper_uns, 
                         alpha=0.2, color='green', label='CQR')
-        
         ax3.set_xlabel('Time Step')
-        ax3.set_ylabel(STATE_NAMES[state_idx])
+        ax3.set_ylabel(state_label)
         ax3.set_title(f'CQR - Coverage: {cal_coverage:.2f}%')
         ax3.legend()
         ax3.grid(True, alpha=0.3)
         
-        # Add overall title
-        fig.suptitle(f'{STATE_NAMES[state_idx]} - Comparison of Prediction Methods', fontsize=16, y=1.02)
-        
+        fig.suptitle(f'{state_label} - Comparison of Prediction Methods', fontsize=16, y=1.02)
         plt.tight_layout()
-        plt.savefig(f"{save_dir}/cqr_comparison_{STATE_NAMES[state_idx]}.png", dpi=300, bbox_inches='tight')
+        plt.savefig(f"{save_dir}/cqr_comparison_{state_label}.png", dpi=300, bbox_inches='tight')
         plt.close()
         
-        print(f"  {STATE_NAMES[state_idx]}: Uncalibrated {uncal_coverage:.2f}% → CQR {cal_coverage:.2f}%")
+        print(f"{state_label}: Uncalibrated {uncal_coverage:.2f}% → CQR {cal_coverage:.2f}%")
 
-def main():    
-    window_size = 15
-    model_path = "results/ann/model_cluster0_run1751300407.pt"
-    data_path = "Data/clustered/cluster0"
-    results_dir = "results/ann"
-    save_dir = os.path.join(results_dir, f"cqr_results")
+def run_cqr_pipeline(model_path, data_path, results_dir, window_size):
+    cluster_name = os.path.basename(data_path.rstrip("/"))
+    save_dir = os.path.join(results_dir, "cqr_results", cluster_name)
+    os.makedirs(save_dir, exist_ok=True)
+
+    print(f"\nRunning CQR pipeline for {cluster_name}")
     
     # Load data files and split
     data_files = [os.path.join(data_path, f) for f in os.listdir(data_path) if f.endswith(".txt")]
-    train_files, temp_files = train_test_split(data_files, test_size=0.2, random_state=44)
+    train_files, temp_files = train_test_split(data_files, test_size=0.3, random_state=44)
     cal_files, test_files = train_test_split(temp_files, test_size=0.5, random_state=44)
     
     print(f"Training: {len(train_files)} files")
@@ -369,19 +357,16 @@ def main():
     
     # Load model
     input_size = window_size * (STATE_COLS + CONTROL_COLS)
-    model = get_model(input_size=input_size, model_type="bilstm_multihead").to(DEVICE)
+    model = get_model(input_size=input_size, model_type="stacked_lstm_reg", window_size=window_size).to(DEVICE)
     model.load_state_dict(torch.load(model_path, map_location=DEVICE))
     
     # Initialize and fit scaler
-    print("\nFitting scaler on training data...")
     scaler = MinMaxScaler()
     
     for i, file in enumerate(train_files[:10]):
         raw = np.loadtxt(file, skiprows=1)
-        cleaned = clean_state_spikes(raw)
+        _, _, cleaned = clean_and_filter(raw)
         scaler.partial_fit(cleaned)
-        if i % 5 == 0:
-            print(f"  Fitted on {i+1}/10 files")
     
     # Generate error dataset
     inputs, errors_dict = generate_error_dataset(model, train_files, window_size, scaler)
@@ -408,14 +393,27 @@ def main():
     correction_factors = compute_conformity_scores(model, quantile_models, cal_files, window_size, scaler)
     
     # Create visualizations
-    os.makedirs(save_dir, exist_ok=True)
-    plot_all_states_comparison(
-        model, quantile_models, correction_factors,
-        test_files, window_size, scaler, save_dir
+    all_results = compute_all_predictions_and_coverage(
+        model, quantile_models, correction_factors, test_files, window_size, scaler
     )
-
-    print("\nCQR pipeline completed successfully!")
+    
+    random.seed(46)
+    selected_results = random.choice(all_results)
+    plot_selected_file_results(selected_results, save_dir)
+    
+    print(f"\nCQR pipeline completed for {cluster_name}")
     print(f"Results saved in: {save_dir}")
+
+def main():
+    cluster_configs = [
+        ("results/ann/model_cluster0_run1751974461.pt", "Data/clustered/cluster0"),
+        # ("results/ann/model_cluster1_run1751974462.pt", "Data/clustered/cluster1"),
+    ]
+    results_dir = "results/ann"
+    window_size = 10
+    
+    for model_path, data_path in cluster_configs:
+        run_cqr_pipeline(model_path, data_path, results_dir, window_size)
 
 if __name__ == "__main__":
     main()
