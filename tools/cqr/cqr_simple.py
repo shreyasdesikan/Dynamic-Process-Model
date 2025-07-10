@@ -407,7 +407,7 @@ def run_cqr_pipeline(model_path, data_path, results_dir, window_size):
 def main():
     cluster_configs = [
         ("results/ann/model_cluster0_run1751974461.pt", "Data/clustered/cluster0"),
-        # ("results/ann/model_cluster1_run1751974462.pt", "Data/clustered/cluster1"),
+        ("results/ann/model_cluster1_run1752146723.pt", "Data/clustered/cluster1"),
     ]
     results_dir = "results/ann"
     window_size = 10
