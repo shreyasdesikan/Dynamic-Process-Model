@@ -90,3 +90,37 @@ use_saved_model: None
 early_stopping: False
 early_stop_patience: 10
 test_zscore_threshold: False
+
+===== Run ID: 1751973396 | Cluster 0 ===== (stacked LSTM with Reg, no data filter on test set, epochs 100)
+clusters: [0]
+train_all: False
+epochs: 100
+lr: 0.0001
+batch_size: 64
+window_size: 10
+model: stacked_bilstm_reg
+log_scale: False
+log_hyperparams: True
+save_model: True
+test_saved_model: None
+open_loop_run: None
+early_stopping: False
+early_stop_patience: 10
+test_zscore_filter: False
+
+===== Run ID: 1751974461 | Cluster 0 ===== (stacked LSTM with Reg, with data filter on test set, data filter not shown on visualization, epochs 30)
+clusters: [0]
+train_all: False
+epochs: 30
+lr: 0.0001
+batch_size: 64
+window_size: 10
+model: stacked_bilstm_reg
+log_scale: False
+log_hyperparams: True
+save_model: True
+test_saved_model: None
+open_loop_run: None
+early_stopping: False
+early_stop_patience: 10
+test_zscore_filter: False
