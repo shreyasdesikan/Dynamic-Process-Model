@@ -17,7 +17,7 @@ sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / 'tools'))
 
 from models.ANN.narx_model import get_model
-from train import load_batch_data, clean_and_filter
+from train import clean_batch, window_batch_data, clean_and_filter
 
 
 CONTROL_COLS = 7
@@ -85,11 +85,16 @@ def generate_error_dataset(model, data_files, window_size, scaler):
     all_errors = {f'state_{i}': [] for i in range(STATE_COLS)}
     
     with torch.no_grad():
-        for i, file_path in enumerate(data_files):
+        data_cleaned = []
+        for file in data_files:
+            cleaned = clean_batch(file)
+            data_cleaned.append(cleaned)
+        for i, cleaned in enumerate(data_cleaned):
             if i % 5 == 0:
                 print(f"  Processing file {i+1}/{len(data_files)}...")
-                
-            X, Y = load_batch_data(file_path, window_size, scaler)
+            
+            scaled = scaler.transform(cleaned)    
+            X, Y = window_batch_data(scaled, window_size)
             X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
             Y_tensor = torch.tensor(Y, dtype=torch.float32)
             
@@ -144,8 +149,13 @@ def compute_conformity_scores(model, quantile_models, cal_files, window_size, sc
             qr.eval()
     
     with torch.no_grad():
-        for file_path in cal_files:
-            X, Y = load_batch_data(file_path, window_size, scaler)
+        cal_cleaned = []
+        for file in cal_files:
+            cleaned = clean_batch(file)
+            cal_cleaned.append(cleaned)
+        for cleaned in cal_cleaned:
+            scaled = scaler.transform(cleaned)
+            X, Y = window_batch_data(scaled, window_size)
             X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
             Y_tensor = torch.tensor(Y, dtype=torch.float32)
             
@@ -190,10 +200,15 @@ def compute_all_predictions_and_coverage(model, quantile_models, correction_fact
     # Store all computed results
     all_results = []
     
-    for file_idx, test_file in enumerate(test_files):
+    test_cleaned = []
+    for file in test_files:
+        cleaned = clean_batch(file)
+        test_cleaned.append(cleaned)
+    for file_idx, (cleaned, test_file) in enumerate(zip(test_cleaned, test_files)):
         print(f"Processing file {file_idx + 1}/{len(test_files)}: {os.path.basename(test_file)}")
         
-        X, Y = load_batch_data(test_file, window_size, scaler)
+        scaled = scaler.transform(cleaned)
+        X, Y = window_batch_data(scaled, window_size)
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
         
         # Store results for this file
@@ -406,8 +421,8 @@ def run_cqr_pipeline(model_path, data_path, results_dir, window_size):
 
 def main():
     cluster_configs = [
-        ("results/ann/model_cluster0_run1751974461.pt", "Data/clustered/cluster0"),
-        ("results/ann/model_cluster1_run1752146723.pt", "Data/clustered/cluster1"),
+        ("results/ann/model_cluster0_run1752226124.pt", "Data/clustered/cluster0"),
+        ("results/ann/model_cluster1_run1752226909.pt", "Data/clustered/cluster1"),
     ]
     results_dir = "results/ann"
     window_size = 10
