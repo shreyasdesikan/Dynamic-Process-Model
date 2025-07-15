@@ -25,7 +25,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 TAU_LOW = 0.1
 TAU_HIGH = 0.9
 ALPHA = 1 - (TAU_HIGH - TAU_LOW)
-SEED = 40
+SEED = 44
 
 random.seed(SEED)
 
@@ -90,10 +90,7 @@ def generate_error_dataset(model, data_files, window_size, scaler):
     all_errors = {f'state_{i}': [] for i in range(STATE_COLS)}
     
     with torch.no_grad():
-        for i, file_path in enumerate(data_files):
-            if i % 5 == 0:
-                print(f"  Processing file {i+1}/{len(data_files)}...")
-            
+        for file_path in data_files:
             X, Y = load_batch_data(file_path, window_size, scaler)
             X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
             Y_tensor = torch.tensor(Y, dtype=torch.float32)
@@ -239,7 +236,7 @@ def compute_all_predictions_and_coverage(model, quantile_models, correction_fact
             cal_coverage = np.mean((Y_true_uns >= cal_lower_uns) & (Y_true_uns <= cal_upper_uns)) * 100
 
             # For plotting, sample a subset
-            n_plot_points = min(200, len(X))
+            n_plot_points = min(100, len(X))
             plot_indices = np.linspace(0, len(X)-1, n_plot_points, dtype=int)
 
             # Store all computed results
@@ -306,10 +303,10 @@ def plot_selected_file_results(selected_results, save_dir):
         uncal_inside = (Y_true_uns >= uncal_lower_uns) & (Y_true_uns <= uncal_upper_uns)
         
         ax2.scatter(x_plot[uncal_inside], Y_true_uns[uncal_inside], 
-                   c='blue', s=20, alpha=0.6, label='Inside interval')
+                   c='blue', s=15, alpha=0.6, label='Inside interval')
         ax2.scatter(x_plot[~uncal_inside], Y_true_uns[~uncal_inside], 
-                   c='red', s=20, alpha=0.6, marker='x', label='Outside interval')
-        ax2.plot(x_plot, Y_pred_uns, 'b-', linewidth=2, label='Mean prediction')
+                   c='red', s=15, alpha=0.6, marker='x', label='Outside interval')
+        ax2.plot(x_plot, Y_pred_uns, 'b-', linewidth=1.2, label='Mean prediction')
         ax2.fill_between(x_plot, uncal_lower_uns, uncal_upper_uns, 
                         alpha=0.2, color='blue', label='Uncalibrated QR')
         ax2.set_xlabel('Time Step')
@@ -322,10 +319,10 @@ def plot_selected_file_results(selected_results, save_dir):
         cal_inside = (Y_true_uns >= cal_lower_uns) & (Y_true_uns <= cal_upper_uns)
         
         ax3.scatter(x_plot[cal_inside], Y_true_uns[cal_inside], 
-                   c='green', s=20, alpha=0.6, label='Inside interval')
+                   c='green', s=15, alpha=0.6, label='Inside interval')
         ax3.scatter(x_plot[~cal_inside], Y_true_uns[~cal_inside], 
-                   c='red', s=20, alpha=0.6, marker='x', label='Outside interval')
-        ax3.plot(x_plot, Y_pred_uns, 'g-', linewidth=2, label='Mean prediction')
+                   c='red', s=15, alpha=0.6, marker='x', label='Outside interval')
+        ax3.plot(x_plot, Y_pred_uns, 'g-', linewidth=1.2, label='Mean prediction')
         ax3.fill_between(x_plot, cal_lower_uns, cal_upper_uns, 
                         alpha=0.2, color='green', label='CQR')
         ax3.set_xlabel('Time Step')
@@ -356,7 +353,7 @@ def run_cqr_pipeline(model_path, data_path, results_dir, window_size):
     print(f"\nRunning CQR pipeline for {cluster_name}")
     
     # Load data files and split
-    data_files = [os.path.join(data_path, f) for f in os.listdir(data_path) if f.endswith(".txt")]
+    data_files = [os.path.join(data_path, f) for f in os.listdir(data_path)]
     train_files, temp_files = train_test_split(data_files, test_size=0.3, random_state=SEED)
     cal_files, test_files = train_test_split(temp_files, test_size=0.5, random_state=SEED)
     
