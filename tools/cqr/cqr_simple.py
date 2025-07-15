@@ -7,7 +7,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import MinMaxScaler, StandardScaler
+from sklearn.preprocessing import StandardScaler
 from pathlib import Path
 import random
 
@@ -25,6 +25,9 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 TAU_LOW = 0.1
 TAU_HIGH = 0.9
 ALPHA = 1 - (TAU_HIGH - TAU_LOW)
+SEED = 40
+
+random.seed(SEED)
 
 class ErrorDataset(Dataset):
     """Dataset for training quantile regressors on prediction errors"""
@@ -67,12 +70,15 @@ def pinball_loss(predictions, targets, tau):
     )
     return torch.mean(loss)
 
-def unscale_state_values(arr, state_idx, scaler):
-    # dummy = np.zeros((len(arr), STATE_COLS + CONTROL_COLS))
-    # dummy[:, state_idx] = arr
-    # return scaler.inverse_transform(dummy)[:, state_idx]
-    return arr * scaler.scale_[state_idx] + scaler.mean_[state_idx]
+def load_batch_data(file_path, window_size, scaler, sm_filt=True):
+    """Load and process a single batch file consistently with train.py"""
+    cleaned = clean_batch(file_path, sm_filt=sm_filt)
+    scaled = scaler.transform(cleaned)
+    X, Y = window_batch_data(scaled, window_size)
+    return X, Y
 
+def unscale_state_values(arr, state_idx, scaler):
+    return arr * scaler.scale_[state_idx] + scaler.mean_[state_idx]
 
 # ============= TASK 1: Generate Error Dataset and Train Quantile Regressors =============
 
@@ -84,21 +90,16 @@ def generate_error_dataset(model, data_files, window_size, scaler):
     all_errors = {f'state_{i}': [] for i in range(STATE_COLS)}
     
     with torch.no_grad():
-        data_cleaned = []
-        for file in data_files:
-            cleaned = clean_batch(file)
-            data_cleaned.append(cleaned)
-        for i, cleaned in enumerate(data_cleaned):
+        for i, file_path in enumerate(data_files):
             if i % 5 == 0:
                 print(f"  Processing file {i+1}/{len(data_files)}...")
             
-            scaled = scaler.transform(cleaned)    
-            X, Y = window_batch_data(scaled, window_size)
+            X, Y = load_batch_data(file_path, window_size, scaler)
             X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
             Y_tensor = torch.tensor(Y, dtype=torch.float32)
             
             Y_pred = model(X_tensor).cpu()
-            errors = Y_pred - Y_tensor
+            errors = Y_tensor - Y_pred
             
             all_inputs.extend(X)
             for j in range(STATE_COLS):
@@ -148,13 +149,8 @@ def compute_conformity_scores(model, quantile_models, cal_files, window_size, sc
             qr.eval()
     
     with torch.no_grad():
-        cal_cleaned = []
-        for file in cal_files:
-            cleaned = clean_batch(file)
-            cal_cleaned.append(cleaned)
-        for cleaned in cal_cleaned:
-            scaled = scaler.transform(cleaned)
-            X, Y = window_batch_data(scaled, window_size)
+        for file_path in cal_files:
+            X, Y = load_batch_data(file_path, window_size, scaler)
             X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
             Y_tensor = torch.tensor(Y, dtype=torch.float32)
             
@@ -167,12 +163,12 @@ def compute_conformity_scores(model, quantile_models, cal_files, window_size, sc
                 q_low = quantile_models[state_name]['low'](X_tensor).cpu().squeeze()
                 q_high = quantile_models[state_name]['high'](X_tensor).cpu().squeeze()
                 
-                # Compute conformity scores
+                # Compute conformity scores consistently
                 y_true = Y_tensor[:, i]
                 y_pred = Y_pred[:, i]
-                
-                # E_i = max(q_low - (y_true - y_pred), (y_true - y_pred) - q_high)
                 actual_error = y_true - y_pred
+                
+                # E_i = max(q_low - error, error - q_high)
                 lower_score = q_low - actual_error
                 upper_score = actual_error - q_high
                 scores = torch.maximum(lower_score, upper_score)
@@ -194,20 +190,16 @@ def compute_conformity_scores(model, quantile_models, cal_files, window_size, sc
 # ============= TASK 3: Analyze and Visualize Performance =============
 
 def compute_all_predictions_and_coverage(model, quantile_models, correction_factors, test_files, window_size, scaler):
+    """Compute predictions and coverage statistics for all test files"""
     print("\nComputing predictions and coverage for all test files")
 
     # Store all computed results
     all_results = []
-    
-    test_cleaned = []
-    for file in test_files:
-        cleaned = clean_batch(file)
-        test_cleaned.append(cleaned)
-    for file_idx, (cleaned, test_file) in enumerate(zip(test_cleaned, test_files)):
+
+    for file_idx, test_file in enumerate(test_files):
         print(f"Processing file {file_idx + 1}/{len(test_files)}: {os.path.basename(test_file)}")
         
-        scaled = scaler.transform(cleaned)
-        X, Y = window_batch_data(scaled, window_size)
+        X, Y = load_batch_data(test_file, window_size, scaler)
         X_tensor = torch.tensor(X, dtype=torch.float32).to(DEVICE)
         
         # Store results for this file
@@ -220,19 +212,13 @@ def compute_all_predictions_and_coverage(model, quantile_models, correction_fact
             state_name = f'state_{state_idx}'
             state_label = STATE_NAMES[state_idx]
 
-            # Sample subset for efficiency
-            n_points = min(300, len(X))
-            indices = np.linspace(0, len(X)-1, n_points, dtype=int)
-            X_subset = X_tensor[indices]
-            Y_subset = Y[indices, state_idx]
-
+            # Use ALL points for statistics
             with torch.no_grad():
-                # Get predictions and quantiles
-                Y_pred_all = model(X_subset).cpu().numpy()
+                # Get predictions and quantiles for ALL points
+                Y_pred_all = model(X_tensor).cpu().numpy()
                 Y_pred = Y_pred_all[:, state_idx]
-                q_low = quantile_models[state_name]['low'](X_subset).cpu().squeeze().numpy()
-                q_high = quantile_models[state_name]['high'](X_subset).cpu().squeeze().numpy()
-
+                q_low = quantile_models[state_name]['low'](X_tensor).cpu().squeeze().numpy()
+                q_high = quantile_models[state_name]['high'](X_tensor).cpu().squeeze().numpy()
                 # Compute intervals
                 uncal_lower = Y_pred + q_low
                 uncal_upper = Y_pred + q_high
@@ -240,31 +226,41 @@ def compute_all_predictions_and_coverage(model, quantile_models, correction_fact
                 cal_lower = uncal_lower - correction
                 cal_upper = uncal_upper + correction
 
-            # Unscale everything
-            Y_true_uns = unscale_state_values(Y_subset, state_idx, scaler)
+            # Unscale everything (using ALL points)
+            Y_true_uns = unscale_state_values(Y[:, state_idx], state_idx, scaler)
             Y_pred_uns = unscale_state_values(Y_pred, state_idx, scaler)
             uncal_lower_uns = unscale_state_values(uncal_lower, state_idx, scaler)
             uncal_upper_uns = unscale_state_values(uncal_upper, state_idx, scaler)
             cal_lower_uns = unscale_state_values(cal_lower, state_idx, scaler)
             cal_upper_uns = unscale_state_values(cal_upper, state_idx, scaler)
 
-            # Calculate coverage
+            # Calculate coverage on ALL points
             uncal_coverage = np.mean((Y_true_uns >= uncal_lower_uns) & (Y_true_uns <= uncal_upper_uns)) * 100
             cal_coverage = np.mean((Y_true_uns >= cal_lower_uns) & (Y_true_uns <= cal_upper_uns)) * 100
 
-            # Store all computed results for the state
+            # For plotting, sample a subset
+            n_plot_points = min(200, len(X))
+            plot_indices = np.linspace(0, len(X)-1, n_plot_points, dtype=int)
+
+            # Store all computed results
             file_results['states'][state_idx] = {
                 'state_name': state_name,
                 'state_label': state_label,
-                'n_points': n_points,
-                'Y_true_uns': Y_true_uns,
-                'Y_pred_uns': Y_pred_uns,
-                'uncal_lower_uns': uncal_lower_uns,
-                'uncal_upper_uns': uncal_upper_uns,
-                'cal_lower_uns': cal_lower_uns,
-                'cal_upper_uns': cal_upper_uns,
-                'uncal_coverage': uncal_coverage,
-                'cal_coverage': cal_coverage
+                'n_total_points': len(X),  # Total points used for statistics
+                'n_plot_points': n_plot_points,  # Points used for plotting
+                'plot_indices': plot_indices,
+                # Store full arrays for coverage calculation
+                'Y_true_uns_full': Y_true_uns,
+                'Y_pred_uns_full': Y_pred_uns,
+                # Store subset for plotting
+                'Y_true_uns': Y_true_uns[plot_indices],
+                'Y_pred_uns': Y_pred_uns[plot_indices],
+                'uncal_lower_uns': uncal_lower_uns[plot_indices],
+                'uncal_upper_uns': uncal_upper_uns[plot_indices],
+                'cal_lower_uns': cal_lower_uns[plot_indices],
+                'cal_upper_uns': cal_upper_uns[plot_indices],
+                'uncal_coverage': uncal_coverage,  # Calculated on ALL points
+                'cal_coverage': cal_coverage  # Calculated on ALL points
             }
         
         all_results.append(file_results)
@@ -281,6 +277,7 @@ def compute_all_predictions_and_coverage(model, quantile_models, correction_fact
     return all_results
 
 def plot_selected_file_results(selected_results, save_dir):
+    """Create comparison plots for a selected file"""
     filename = selected_results['filename']
     print(f"\nCreating plots for: {os.path.basename(filename)}")
     
@@ -290,8 +287,8 @@ def plot_selected_file_results(selected_results, save_dir):
         
         print(f"Plotting {state_label}...")
         
-        # Extract data
-        n_points = state_data['n_points']
+        # Extract plotting data (subset)
+        n_points = state_data['n_plot_points']
         Y_true_uns = state_data['Y_true_uns']
         Y_pred_uns = state_data['Y_pred_uns']
         uncal_lower_uns = state_data['uncal_lower_uns']
@@ -302,19 +299,10 @@ def plot_selected_file_results(selected_results, save_dir):
         cal_coverage = state_data['cal_coverage']
         
         # Create figure with 3 subplots
-        fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 5))
+        fig, (ax2, ax3) = plt.subplots(1, 2, figsize=(18, 5))
         x_plot = np.arange(n_points)
         
-        # Plot 1: Mean Prediction Only
-        ax1.scatter(x_plot, Y_true_uns, c='black', s=20, alpha=0.6, label='Data')
-        ax1.plot(x_plot, Y_pred_uns, 'b-', linewidth=2, label='Mean prediction')
-        ax1.set_xlabel('Time Step')
-        ax1.set_ylabel(state_label)
-        ax1.set_title('Mean Prediction Only')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        
-        # Plot 2: Uncalibrated QR
+        # Plot 1: Uncalibrated QR
         uncal_inside = (Y_true_uns >= uncal_lower_uns) & (Y_true_uns <= uncal_upper_uns)
         
         ax2.scatter(x_plot[uncal_inside], Y_true_uns[uncal_inside], 
@@ -330,7 +318,7 @@ def plot_selected_file_results(selected_results, save_dir):
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         
-        # Plot 3: CQR (Calibrated)
+        # Plot 2: CQR (Calibrated)
         cal_inside = (Y_true_uns >= cal_lower_uns) & (Y_true_uns <= cal_upper_uns)
         
         ax3.scatter(x_plot[cal_inside], Y_true_uns[cal_inside], 
@@ -351,22 +339,13 @@ def plot_selected_file_results(selected_results, save_dir):
         plt.savefig(f"{save_dir}/cqr_comparison_{state_label}.png", dpi=300, bbox_inches='tight')
         plt.close()
         
-        print(f"{state_label}: Uncalibrated {uncal_coverage:.2f}% → CQR {cal_coverage:.2f}%")
+        print(f"  {state_label}: Uncalibrated {uncal_coverage:.2f}% → CQR {cal_coverage:.2f}%")
 
-def initialize_scaler(train_files):
+def initialize_scaler(files):
     """Initialize and fit scaler on training data"""
     scaler = StandardScaler()
-    
-    all_cleaned_data = []
-    for file_path in train_files:
-        cleaned = clean_batch(file_path, sm_filt=True)
-        all_cleaned_data.append(cleaned)
-    
-    # Fit scaler on all concatenated data
-    concatenated_data = np.concatenate(all_cleaned_data, axis=0)
-    scaler.fit(concatenated_data)
-    
-    print(f"Scaler fitted on {len(concatenated_data)} samples from {len(train_files)} files")
+    cleaned_all = [clean_batch(f, sm_filt=True) for f in files]
+    scaler.fit(np.concatenate(cleaned_all, axis=0))
     return scaler
 
 def run_cqr_pipeline(model_path, data_path, results_dir, window_size):
@@ -378,8 +357,8 @@ def run_cqr_pipeline(model_path, data_path, results_dir, window_size):
     
     # Load data files and split
     data_files = [os.path.join(data_path, f) for f in os.listdir(data_path) if f.endswith(".txt")]
-    train_files, temp_files = train_test_split(data_files, test_size=0.3, random_state=44)
-    cal_files, test_files = train_test_split(temp_files, test_size=0.5, random_state=44)
+    train_files, temp_files = train_test_split(data_files, test_size=0.2, random_state=SEED)
+    cal_files, test_files = train_test_split(temp_files, test_size=0.5, random_state=SEED)
     
     print(f"Training: {len(train_files)} files")
     print(f"Calibration: {len(cal_files)} files")
@@ -422,7 +401,6 @@ def run_cqr_pipeline(model_path, data_path, results_dir, window_size):
         model, quantile_models, correction_factors, test_files, window_size, scaler
     )
     
-    random.seed(46)
     selected_results = random.choice(all_results)
     plot_selected_file_results(selected_results, save_dir)
     
