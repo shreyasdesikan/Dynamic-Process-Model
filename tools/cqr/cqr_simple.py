@@ -17,11 +17,9 @@ sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / 'tools'))
 
 from models.ANN.narx_model import get_model
-from train import clean_batch, window_batch_data, clean_and_filter
+from train import clean_batch, window_batch_data, CONTROL_COLS, STATE_NAMES
 
 
-CONTROL_COLS = 7
-STATE_NAMES = ['c', 'T_PM', 'd50', 'd90', 'd10', 'T_TM']
 STATE_COLS = len(STATE_NAMES)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 TAU_LOW = 0.1
@@ -354,6 +352,22 @@ def plot_selected_file_results(selected_results, save_dir):
         
         print(f"{state_label}: Uncalibrated {uncal_coverage:.2f}% → CQR {cal_coverage:.2f}%")
 
+def initialize_scaler(train_files):
+    """Initialize and fit scaler on training data"""
+    scaler = MinMaxScaler()
+    
+    all_cleaned_data = []
+    for file_path in train_files:
+        cleaned = clean_batch(file_path, sm_filt=True)
+        all_cleaned_data.append(cleaned)
+    
+    # Fit scaler on all concatenated data
+    concatenated_data = np.concatenate(all_cleaned_data, axis=0)
+    scaler.fit(concatenated_data)
+    
+    print(f"Scaler fitted on {len(concatenated_data)} samples from {len(train_files)} files")
+    return scaler
+
 def run_cqr_pipeline(model_path, data_path, results_dir, window_size):
     cluster_name = os.path.basename(data_path.rstrip("/"))
     save_dir = os.path.join(results_dir, "cqr_results", cluster_name)
@@ -376,12 +390,7 @@ def run_cqr_pipeline(model_path, data_path, results_dir, window_size):
     model.load_state_dict(torch.load(model_path, map_location=DEVICE))
     
     # Initialize and fit scaler
-    scaler = MinMaxScaler()
-    
-    for i, file in enumerate(train_files[:10]):
-        raw = np.loadtxt(file, skiprows=1)
-        _, _, cleaned = clean_and_filter(raw)
-        scaler.partial_fit(cleaned)
+    scaler = initialize_scaler(train_files)
     
     # Generate error dataset
     inputs, errors_dict = generate_error_dataset(model, train_files, window_size, scaler)
