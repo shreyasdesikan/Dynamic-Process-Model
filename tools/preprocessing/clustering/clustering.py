@@ -35,7 +35,7 @@ class BatchClustering:
         logging.info(f"Initialized BatchClustering with parameters: {vars(self)}")
 
     def detect_encoding(self, file_path):
-        """Erkennung der Dateikodierung"""
+        """Detect file encoding"""
         try:
             with open(file_path, 'rb') as f:
                 result = chardet.detect(f.read(10000))
@@ -115,7 +115,7 @@ class BatchClustering:
         return df
          
     def exclude_noisy_files(self, max_std_threshold=0.001):
-        """Exclude files with excessive noise """
+        """Exclude files with excessive noise"""
         noisy_files = []
         for file_name, df in self.batches.items():
             if df[['d10', 'd50', 'd90']].std().max() > max_std_threshold:
@@ -141,7 +141,7 @@ class BatchClustering:
             logging.error(f"Error during peak removal: {e}")
             
     def extract_features(self, steady_frac: float = 1.0):
-        """Extrahieren von Features aus jeder Batch"""
+        """Extract features from each batch"""
         rows = []
         for name, df in self.batches.items():
             try:
@@ -150,7 +150,7 @@ class BatchClustering:
                 ss = df.tail(n_ss)
                 
                 if ss['d50'].std() / ss['d50'].mean() > 0.1:
-                    logging.warning(f"Batch {name} möglicherweise nicht im stabilen Zustand (hohe Varianz in d50)")
+                    logging.warning(f"Batch {name} may not be in steady state (high variance in d50)")
 
                 feature_dict = {'batch': name}
                 feature_dict['avg_d10'] = ss['d10'].mean()
@@ -168,53 +168,51 @@ class BatchClustering:
                 feature_dict['avg_T_TM_in'] = df['T_TM_in'].mean()
                 rows.append(feature_dict)
             except Exception as e:
-                logging.error(f"Fehler beim Extrahieren von Features aus {name}: {e}")
-
-
+                logging.error(f"Error extracting features from {name}: {e}")
 
         self.features = pd.DataFrame(rows)
         self.clean_features = self.features.copy()
-        logging.info(f"Features für {len(self.features)} Batches extrahiert")
+        logging.info(f"Features extracted for {len(self.features)} batches")
 
     def remove_outliers(self, z_thresh=3.0, iso_frac=0.05):
-        """Entfernen von Ausreißern mit Z-Score und Isolation Forest"""
+        """Remove outliers using Z-Score and Isolation Forest"""
         df = self.clean_features.copy()
         try:
             df_z = df.drop(columns=['batch']).apply(zscore)
             mask_z = (np.abs(df_z) < z_thresh).all(axis=1)
             df = df[mask_z]
-            logging.info(f"{len(self.clean_features) - len(df)} Ausreißer mit Z-Score entfernt")
+            logging.info(f"{len(self.clean_features) - len(df)} outliers removed with Z-Score")
 
             iso = IsolationForest(contamination=iso_frac, random_state=0)
             iso_mask = iso.fit_predict(df.drop(columns=['batch'])) == 1
             df = df[iso_mask]
-            logging.info(f"{len(self.clean_features) - len(df)} Ausreißer mit Isolation Forest entfernt")
+            logging.info(f"{len(self.clean_features) - len(df)} outliers removed with Isolation Forest")
 
             removed = self.features[~self.features['batch'].isin(df['batch'])]['batch']
-            logging.info(f"Entfernte Batches als Ausreißer: {removed.tolist()}")
+            logging.info(f"Removed batches as outliers: {removed.tolist()}")
             self.clean_features = df
             return df
         except Exception as e:
-            logging.error(f"Fehler beim Entfernen von Ausreißern: {e}")
+            logging.error(f"Error removing outliers: {e}")
             return self.clean_features
     
     def prepare(self):
-        """Daten für Clustering vorbereiten"""
+        """Prepare data for clustering"""
         try:
             X = self.clean_features.drop(columns=['batch']).values
             self.X_scaled = self.scaler.fit_transform(X)
-            logging.info(f"Daten skaliert mit Shape {self.X_scaled.shape}")
+            logging.info(f"Scaled data with shape {self.X_scaled.shape}")
         except Exception as e:
-            logging.error(f"Fehler bei der Datenaufbereitung: {e}")
+            logging.error(f"Error in data preparation: {e}")
 
     def run_pca(self, show=True):
-        """PCA anwenden und Ergebnisse visualisieren"""
+        """Apply PCA and visualize results"""
         try:
             n_components = max(self.min_components, int(self.var_threshold * self.X_scaled.shape[1]))
             self.pca.n_components = n_components
             self.X_use = self.pca.fit_transform(self.X_scaled)
             var_sum = self.pca.explained_variance_ratio_.sum() * 100
-            logging.info(f"PCA behielt {self.X_use.shape[1]} Komponenten (kumulative Varianz {var_sum:.1f}%)")
+            logging.info(f"PCA retained {self.X_use.shape[1]} components (cumulative variance {var_sum:.1f}%)")
 
             if show and self.X_use.shape[1] >= 2:
                 fig = px.scatter(
@@ -236,11 +234,11 @@ class BatchClustering:
 
             return self.X_use
         except Exception as e:
-            logging.error(f"Fehler beim Ausführen von PCA: {e}")
+            logging.error(f"Error running PCA: {e}")
             return None
 
     def find_k(self, max_k=10, show_elbow=True):
-        """Optimale Anzahl an Clustern finden"""
+        """Find optimal number of clusters"""
         try:
             Ks = range(2, max_k + 1)
             inertias, silhs = [], []
@@ -251,27 +249,27 @@ class BatchClustering:
                 silhs.append(silhouette_score(self.X_use, lbl))
             
             best_k = Ks[np.argmax(silhs)]
-            logging.info(f"Bester k = {best_k}, Silhouette = {max(silhs):.3f}")
+            logging.info(f"Best k = {best_k}, Silhouette = {max(silhs):.3f}")
 
             if show_elbow:
                 plt.figure(figsize=(6, 4))
                 plt.plot(Ks, inertias, 'o-k')
-                plt.xlabel('Anzahl Cluster (k)')
+                plt.xlabel('Number of clusters (k)')
                 plt.ylabel('Inertia')
-                plt.title('Elbow-Methode für optimales k')
+                plt.title('Elbow method for optimal k')
                 plt.grid(True)
                 plt.show()
 
             return best_k
         except Exception as e:
-            logging.error(f"Fehler beim Finden von k: {e}")
+            logging.error(f"Error finding k: {e}")
             return None
 
     def compute_silhouette_per_cluster(self):
-        """Silhouette-Score pro Cluster berechnen"""
+        """Calculate Silhouette score per cluster"""
         try:
             if len(set(self.labels_)) <= 1 or (-1 in self.labels_ and len(set(self.labels_)) <= 2):
-                logging.warning("Zu wenige Cluster für Silhouette-Score-Berechnung")
+                logging.warning("Too few clusters for Silhouette score calculation")
                 return None
 
             self.silhouette_scores_ = silhouette_samples(self.X_use, self.labels_)
@@ -281,17 +279,17 @@ class BatchClustering:
                     continue
                 mask = self.labels_ == cluster_id
                 cluster_silhouettes[cluster_id] = np.mean(self.silhouette_scores_[mask])
-                logging.info(f"Silhouette-Score für Cluster {cluster_id}: {cluster_silhouettes[cluster_id]:.3f}")
+                logging.info(f"Silhouette score for cluster {cluster_id}: {cluster_silhouettes[cluster_id]:.3f}")
 
             sil_avg = silhouette_score(self.X_use, self.labels_)
-            logging.info(f"Durchschnittlicher Silhouette-Score: {sil_avg:.3f}")
+            logging.info(f"Average Silhouette score: {sil_avg:.3f}")
             return cluster_silhouettes, sil_avg
         except Exception as e:
-            logging.error(f"Fehler beim Berechnen des Silhouette-Scores: {e}")
+            logging.error(f"Error calculating Silhouette score: {e}")
             return None
 
     def cluster(self):
-        """Clustering mit der angegebenen Methode durchführen"""
+        """Perform clustering with the specified method"""
         try:
             if self.method == "kmeans":
                 model = KMeans(n_clusters=self.n_clusters, random_state=0, n_init=10)
@@ -303,29 +301,29 @@ class BatchClustering:
                 model = HDBSCAN(min_cluster_size=5)
                 self.labels_ = model.fit_predict(self.X_use)
             else:
-                logging.error(f"Unbekannte Methode: {self.method}")
-                raise ValueError(f"Unbekannte Methode: {self.method}")
+                logging.error(f"Unknown method: {self.method}")
+                raise ValueError(f"Unknown method: {self.method}")
 
             self.clean_features['cluster'] = self.labels_
             ncl = len(set(self.labels_)) - (1 if -1 in self.labels_ else 0)
             if ncl > 1:
                 sil_avg = silhouette_score(self.X_use, self.labels_)
-                logging.info(f"{self.method.upper()}: {ncl} Cluster, durchschnittlicher Silhouette-Score={sil_avg:.3f}")
+                logging.info(f"{self.method.upper()}: {ncl} clusters, average Silhouette score={sil_avg:.3f}")
                 self.compute_silhouette_per_cluster()
                 self.plot_silhouette()
             else:
-                logging.warning("Zu wenige Cluster für Silhouette-Score-Berechnung")
+                logging.warning("Too few clusters for Silhouette score calculation")
 
             return self.labels_
         except Exception as e:
-            logging.error(f"Fehler beim Clustering: {e}")
+            logging.error(f"Clustering error: {e}")
             return None
 
     def plot_silhouette(self):
-        """Silhouette-Plot für Cluster erstellen"""
+        """Create silhouette plot for clusters"""
         try:
             if self.silhouette_scores_ is None or len(set(self.labels_)) <= 1:
-                logging.warning("Keine Silhouette-Scores verfügbar oder zu wenige Cluster")
+                logging.warning("No silhouette scores available or too few clusters")
                 return
 
             fig = go.Figure()
@@ -347,19 +345,19 @@ class BatchClustering:
 
             avg_score = silhouette_score(self.X_use, self.labels_)
             fig.add_vline(x=avg_score, line_dash="dash", line_color="red", 
-                          annotation_text=f"Durchschnitt: {avg_score:.3f}", annotation_position="top")
+                          annotation_text=f"Average: {avg_score:.3f}", annotation_position="top")
             fig.update_layout(
-                title="Silhouette-Plot für Cluster",
-                xaxis_title="Silhouette-Koeffizient",
+                title="Silhouette plot for clusters",
+                xaxis_title="Silhouette coefficient",
                 yaxis_title="Cluster",
                 showlegend=True
             )
             fig.show()
         except Exception as e:
-            logging.error(f"Fehler beim Erstellen des Silhouette-Plots: {e}")
+            logging.error(f"Error creating silhouette plot: {e}")
 
     def plot_clusters(self):
-        """Cluster im PCA-Raum visualisieren"""
+        """Visualize clusters in PCA space"""
         try:
             pcs = self.X_use
             labels = self.labels_
@@ -367,15 +365,15 @@ class BatchClustering:
                 x=pcs[:, 0], y=pcs[:, 1], color=labels.astype(str),
                 labels={'x': f'PC1 ({self.pca.explained_variance_ratio_[0]*100:.1f}%)',
                         'y': f'PC2 ({self.pca.explained_variance_ratio_[1]*100:.1f}%)'},
-                title=f"{self.method.upper()} Cluster"
+                title=f"{self.method.upper()} Clusters"
             )
             fig.update_layout(legend_title="Cluster")
             fig.show()
         except Exception as e:
-            logging.error(f"Fehler beim Plotten der Cluster: {e}")
+            logging.error(f"Error plotting clusters: {e}")
 
     def get_cluster_assignments(self):
-        """Cluster-Zuweisungen mit Silhouette-Scores ausgeben"""
+        """Output cluster assignments with Silhouette scores"""
         try:
             cluster_dict = {}
             for cluster_id in np.unique(self.labels_):
@@ -383,19 +381,19 @@ class BatchClustering:
                 batch_names = self.clean_features.loc[mask, 'batch'].tolist()
                 cluster_dict[cluster_id] = batch_names
 
-            logging.info("=== Cluster-Zuweisungen ===")
+            logging.info("=== Cluster Assignments ===")
             for cluster_id, batches in sorted(cluster_dict.items()):
-                logging.info(f"Cluster {cluster_id}: {len(batches)} Batches")
+                logging.info(f"Cluster {cluster_id}: {len(batches)} batches")
                 examples = batches[:3] + (["..."] if len(batches) > 3 else [])
-                logging.info(f"  Beispiele: {examples}")
+                logging.info(f"  Examples: {examples}")
                 if self.silhouette_scores_ is not None and cluster_id != -1:
                     mask = self.labels_ == cluster_id
                     sil_score = np.mean(self.silhouette_scores_[mask])
-                    logging.info(f"  Silhouette-Score: {sil_score:.3f}")
+                    logging.info(f"  Silhouette score: {sil_score:.3f}")
 
             return cluster_dict
         except Exception as e:
-            logging.error(f"Fehler beim Abrufen der Cluster-Zuweisungen: {e}")
+            logging.error(f"Error getting cluster assignments: {e}")
             return None
 
 if __name__ == "__main__":
@@ -422,4 +420,4 @@ if __name__ == "__main__":
         bc.get_cluster_assignments()
         
     except Exception as e:
-        logging.error(f"Fehler in der Hauptausführung: {e}")
+        logging.error(f"Error in main execution: {e}")
