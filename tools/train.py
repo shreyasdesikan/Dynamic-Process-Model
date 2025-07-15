@@ -5,7 +5,7 @@ import numpy as np
 import random
 import torch
 from torch.utils.data import Dataset, DataLoader
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from sklearn.model_selection import train_test_split
 from scipy.signal import butter, filtfilt
 import matplotlib.pyplot as plt
@@ -354,7 +354,7 @@ def train_cluster(cluster_id, cluster_path, args, run_id):
         train_cleaned.append(cleaned)
     
     # Step 2: Fit scaler on all cleaned data concatenated
-    scaler = MinMaxScaler()
+    scaler = StandardScaler()
     scaler.fit(np.concatenate(train_cleaned, axis=0))  # ← fit once across all training data
     
     # Step 3: Apply scaling and windowing per file

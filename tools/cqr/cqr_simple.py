@@ -7,7 +7,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
 from pathlib import Path
 import random
 
@@ -68,9 +68,10 @@ def pinball_loss(predictions, targets, tau):
     return torch.mean(loss)
 
 def unscale_state_values(arr, state_idx, scaler):
-    dummy = np.zeros((len(arr), STATE_COLS + CONTROL_COLS))
-    dummy[:, state_idx] = arr
-    return scaler.inverse_transform(dummy)[:, state_idx]
+    # dummy = np.zeros((len(arr), STATE_COLS + CONTROL_COLS))
+    # dummy[:, state_idx] = arr
+    # return scaler.inverse_transform(dummy)[:, state_idx]
+    return arr * scaler.scale_[state_idx] + scaler.mean_[state_idx]
 
 
 # ============= TASK 1: Generate Error Dataset and Train Quantile Regressors =============
@@ -354,7 +355,7 @@ def plot_selected_file_results(selected_results, save_dir):
 
 def initialize_scaler(train_files):
     """Initialize and fit scaler on training data"""
-    scaler = MinMaxScaler()
+    scaler = StandardScaler()
     
     all_cleaned_data = []
     for file_path in train_files:
@@ -386,7 +387,7 @@ def run_cqr_pipeline(model_path, data_path, results_dir, window_size):
     
     # Load model
     input_size = window_size * (STATE_COLS + CONTROL_COLS)
-    model = get_model(input_size=input_size, model_type="stacked_lstm_reg", window_size=window_size).to(DEVICE)
+    model = get_model(input_size=input_size, model_type="bilstm_multihead", window_size=window_size).to(DEVICE)
     model.load_state_dict(torch.load(model_path, map_location=DEVICE))
     
     # Initialize and fit scaler
@@ -430,8 +431,8 @@ def run_cqr_pipeline(model_path, data_path, results_dir, window_size):
 
 def main():
     cluster_configs = [
-        ("results/ann/model_cluster0_run1752226124.pt", "Data/clustered/cluster0"),
-        ("results/ann/model_cluster1_run1752226909.pt", "Data/clustered/cluster1"),
+        ("results/ann/model_cluster0_run1752576004.pt", "Data/clustered/cluster0"),
+        ("results/ann/model_cluster1_run1752576589.pt", "Data/clustered/cluster1"),
     ]
     results_dir = "results/ann"
     window_size = 10
