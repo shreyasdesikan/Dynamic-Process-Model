@@ -108,7 +108,7 @@ def generate_error_dataset(model, data_files, window_size, scaler):
     print(f"Generated {len(all_inputs)} error samples")
     return np.array(all_inputs), {k: np.array(v) for k, v in all_errors.items()}
 
-def train_quantile_regressor(inputs, errors, tau, epochs=40, batch_size=64, lr=1e-3):
+def train_quantile_regressor(inputs, errors, tau, epochs=30, batch_size=64, lr=1e-3):
     dataset = ErrorDataset(inputs, errors)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     
@@ -357,7 +357,7 @@ def run_cqr_pipeline(model_path, data_path, results_dir, window_size):
     
     # Load data files and split
     data_files = [os.path.join(data_path, f) for f in os.listdir(data_path) if f.endswith(".txt")]
-    train_files, temp_files = train_test_split(data_files, test_size=0.2, random_state=SEED)
+    train_files, temp_files = train_test_split(data_files, test_size=0.3, random_state=SEED)
     cal_files, test_files = train_test_split(temp_files, test_size=0.5, random_state=SEED)
     
     print(f"Training: {len(train_files)} files")
