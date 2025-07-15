@@ -6,14 +6,14 @@ from sklearn.ensemble import IsolationForest
 from sklearn.cluster import KMeans, DBSCAN
 from sklearn.metrics import silhouette_score, silhouette_samples
 from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from hdbscan import HDBSCAN
 import matplotlib.pyplot as plt
 import plotly.express as px
 import plotly.graph_objects as go
 import logging
 import chardet
-from sklearn.preprocessing import MinMaxScaler
+from scipy.signal import butter, filtfilt
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, filename='clustering_log.txt', format='%(asctime)s - %(levelname)s - %(message)s')
@@ -40,17 +40,17 @@ class BatchClustering:
             with open(file_path, 'rb') as f:
                 result = chardet.detect(f.read(10000))
             encoding = result['encoding'] or 'utf-8'
-            logging.info(f"Erkannte Kodierung für {file_path}: {encoding}")
+            logging.info(f"Detected encoding for {file_path}: {encoding}")
             return encoding
         except Exception as e:
-            logging.error(f"Fehler bei der Kodierungserkennung für {file_path}: {e}")
+            logging.error(f"Error detecting encoding for {file_path}: {e}")
             return 'utf-8'
 
     def load_batches(self):
-        """Laden aller .txt-Dateien aus dem angegebenen Verzeichnis"""
+        """Load all .txt files from the specified directory"""
         if not os.path.exists(self.data_dir):
-            logging.error(f"Verzeichnis {self.data_dir} existiert nicht.")
-            raise FileNotFoundError(f"Verzeichnis {self.data_dir} existiert nicht.")
+            logging.error(f"Directory {self.data_dir} does not exist.")
+            raise FileNotFoundError(f"Directory {self.data_dir} does not exist.")
 
         required_cols = ['c', 'T_PM', 'd10', 'd50', 'd90', 'T_TM', 'mf_PM', 'mf_TM', 
                         'Q_g', 'w_crystal', 'c_in', 'T_PM_in', 'T_TM_in']
@@ -64,50 +64,50 @@ class BatchClustering:
                 encoding = self.detect_encoding(file_path)
                 with open(file_path, 'r', encoding=encoding, errors='ignore') as f:
                     first_lines = [f.readline().strip() for _ in range(5)]
-                logging.info(f"Erste Zeilen von {file}: {first_lines}")
+                logging.info(f"First lines of {file}: {first_lines}")
 
                 df = None
                 for sep in separators:
                     try:
                         df = pd.read_csv(file_path, sep=sep, encoding=encoding, skipinitialspace=True)
                         if len(df.columns) > 1:
-                            logging.info(f"Erfolgreich geladen mit Trennzeichen '{sep}' für {file}")
+                            logging.info(f"Successfully loaded with separator '{sep}' for {file}")
                             break
                     except Exception as e:
-                        logging.warning(f"Fehler mit Trennzeichen '{sep}' für {file}: {e}")
+                        logging.warning(f"Error with separator '{sep}' for {file}: {e}")
                 
                 if df is None or df.empty:
-                    logging.warning(f"Datei {file} ist leer oder hat ein ungültiges Format.")
+                    logging.warning(f"File {file} is empty or has invalid format.")
                     continue
 
                 missing_cols = [col for col in required_cols if col not in df.columns]
                 if missing_cols:
-                    logging.warning(f"Datei {file} fehlt folgende Spalten: {missing_cols}")
+                    logging.warning(f"File {file} is missing columns: {missing_cols}")
                     continue
 
                 if df.select_dtypes(include=np.number).empty:
-                    logging.warning(f"Datei {file} enthält keine numerischen Daten.")
+                    logging.warning(f"File {file} contains no numeric data.")
                     continue
 
                 self.batches[file] = df
-                logging.info(f"Geladen {file} mit Shape {df.shape}, Spalten: {list(df.columns)}")
+                logging.info(f"Loaded {file} with shape {df.shape}, columns: {list(df.columns)}")
             except Exception as e:
-                logging.error(f"Fehler beim Laden von {file}: {e}")
+                logging.error(f"Error loading {file}: {e}")
 
         if not self.batches:
-            logging.error("Keine gültigen Daten geladen.")
-            raise ValueError("Keine gültigen Daten geladen.")
+            logging.error("No valid data loaded.")
+            raise ValueError("No valid data loaded.")
 
 
     def apply_moving_average(self, df, window=5):
-        """تطبيق الانزلاق المتوسط لتحسين سلاسة البيانات"""
+        """Apply moving average to smooth the data"""
         for col in ['d10', 'd50', 'd90']:
             if col in df.columns:
                 df[col] = df[col].rolling(window=window, min_periods=1).mean()
         return df
 
     def apply_low_pass_filter(self, df, cutoff=0.1):
-        """تطبيق فلتر منخفض التردد"""
+        """Apply low-pass filter to reduce noise"""
         for col in ['d10', 'd50', 'd90']:
             if col in df.columns:
                 b, a = butter(2, cutoff, btype='low', fs=1.0)
@@ -115,32 +115,30 @@ class BatchClustering:
         return df
          
     def exclude_noisy_files(self, max_std_threshold=0.001):
-        """استبعاد الملفات ذات الضوضاء الشديدة"""
+        """Exclude files with excessive noise """
         noisy_files = []
         for file_name, df in self.batches.items():
             if df[['d10', 'd50', 'd90']].std().max() > max_std_threshold:
                 noisy_files.append(file_name)
         for file in noisy_files:
             del self.batches[file]
-        logging.info(f"تم استبعاد الملفات الصاخبة: {noisy_files}")
+        logging.info(f"Excluded noisy files: {noisy_files}")
          
     def remove_peaks(self, threshold=0.0003):
-    
+        """Remove unrealistic peaks from d10, d50, d90"""
         try:
             for file_name, df in self.batches.items():
-                    # تطبيق التصفية على الأعمدة d10, d50, d90
                 for col in ['d10', 'd50', 'd90']:
                     if col in df.columns:
                         mask = (df[col] <= threshold)
                         df[col] = df[col][mask]
-                # إزالة الصفوف الفارغة بعد التصفية
                 df.dropna(inplace=True)
                 if df.empty:
                     del self.batches[file_name]
-                    logging.warning(f"الملف {file_name} أصبح فارغاً بعد تصفية القمم وتم حذفه")
-            logging.info("تمت تصفية القمم بنجاح")
+                    logging.warning(f"File {file_name} became empty after peak removal and was deleted")
+            logging.info("Peak removal completed successfully")
         except Exception as e:
-            logging.error(f"خطأ أثناء تصفية القمم: {e}")
+            logging.error(f"Error during peak removal: {e}")
             
     def extract_features(self, steady_frac: float = 1.0):
         """Extrahieren von Features aus jeder Batch"""
