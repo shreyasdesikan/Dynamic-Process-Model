@@ -28,7 +28,7 @@ class NARXDataset(Dataset):
     def __getitem__(self, idx):
         return self.X[idx], self.y[idx]
 
-def clean_and_filter(data, z_thresh1=1.0, z_thresh2=3.0, cutoff=0.1, test=False):
+def clean_and_filter(data, z_thresh1=1.0, z_thresh2=3.0, cutoff=0.1, sm_filt=True):
     """Applies stacked Z-score filtering on d10, d50, d90 columns (indices 2, 3, 4)."""
     def apply_zscore_filter(subset, z_thresh):
         cleaned = subset.copy()
@@ -48,8 +48,8 @@ def clean_and_filter(data, z_thresh1=1.0, z_thresh2=3.0, cutoff=0.1, test=False)
     # Second pass
     second_clean = apply_zscore_filter(first_clean, z_thresh2)
     
-    if test:
-        return None, None, second_clean
+    if not sm_filt:
+        return first_clean, second_clean, second_clean
     
     lowpass_filtered = second_clean.copy()
     b, a = butter(N=2, Wn=cutoff, btype='low', fs=1.0)
@@ -58,18 +58,20 @@ def clean_and_filter(data, z_thresh1=1.0, z_thresh2=3.0, cutoff=0.1, test=False)
 
     return first_clean, second_clean, lowpass_filtered
 
-def load_batch_data(file_path, window_size, scaler=None, test=False):
+def clean_batch(file_path, sm_filt=True):
     raw = np.loadtxt(file_path, skiprows=1)
-    _1, _2, cleaned = clean_and_filter(raw, z_thresh1=1.0, z_thresh2=3.0, cutoff=0.1, test=test)
-    scaled = scaler.fit_transform(cleaned) if scaler else cleaned
+    _, second_zthresh, cleaned = clean_and_filter(raw, z_thresh1=1.0, z_thresh2=3.0, cutoff=0.1, sm_filt=sm_filt)
+    return cleaned  # filtered-cleaned data
 
+def window_batch_data(scaled_data, window_size):
     X, Y = [], []
-    for t in range(len(scaled) - window_size):
-        window = scaled[t:t + window_size, :]
-        target = scaled[t + window_size, :STATE_COLS]
+    for t in range(len(scaled_data) - window_size):
+        window = scaled_data[t:t + window_size, :]
+        target = scaled_data[t + window_size, :STATE_COLS]
+
         X.append(window.flatten())
         Y.append(target)
-
+        
     return np.array(X), np.array(Y)
 
 def create_batches_custom(all_X, all_Y, batch_size):
@@ -124,21 +126,23 @@ def plot_losses(train_losses, val_losses, run_id=None, log_hyperparams=False, lo
         plt.show()
     plt.close()
 
-def plot_sample_prediction(model, scaler, test_files, window_size, run_id, cluster_id):
+def plot_sample_prediction(model, scaler, test_files, window_size, run_id, cluster_id, sm_filt=True):
     os.makedirs(f"../results/ann/{run_id}", exist_ok=True)
 
     # Pick a random test file
     sample_file = random.choice(test_files)
-    _, second_zthresh, cleaned_data = clean_and_filter(np.loadtxt(sample_file, skiprows=1), z_thresh1=1.0, z_thresh2=3.0, cutoff=0.1, test=False)
+    _, second_zthresh, filt_data = clean_and_filter(np.loadtxt(sample_file, skiprows=1), z_thresh1=1.0, z_thresh2=3.0, cutoff=0.1, sm_filt=sm_filt)
 
     # Prepare input/output using existing logic
-    scaled_data = scaler.fit_transform(cleaned_data)
-    X, Y = [], []
+    scaled_data = scaler.fit_transform(filt_data)
+    X, Y, Y_unfilt = [], [], []
     for t in range(len(scaled_data) - window_size):
         window = scaled_data[t:t + window_size, :]
         target = scaled_data[t + window_size, :STATE_COLS]
+        target_unfilt = second_zthresh[t + window_size, :STATE_COLS]
         X.append(window.flatten())
         Y.append(target)
+        Y_unfilt.append(target_unfilt)
 
     X = torch.tensor(np.array(X), dtype=torch.float32).to(next(model.parameters()).device)
     with torch.no_grad():
@@ -151,13 +155,14 @@ def plot_sample_prediction(model, scaler, test_files, window_size, run_id, clust
         return scaler.inverse_transform(padded)[:, :STATE_COLS]
 
     Y_true_unscaled = unscale(np.array(Y))
+    Y_true_unfilt = np.array(Y_unfilt)[:, :STATE_COLS]
     Y_pred_unscaled = unscale(Y_pred)
 
     state_names = ['c', 'T_PM', 'd50', 'd90', 'd10', 'T_TM']
 
     for i, state in enumerate(state_names):
         plt.figure()
-        plt.plot(second_zthresh[:, i], label="Unfiltered")
+        plt.plot(Y_true_unfilt[:, i], label="Unfiltered")
         # plt.plot(Y_true_unscaled[:, i], label="True")
         plt.plot(Y_pred_unscaled[:, i], label="Predicted", linestyle="--")
         plt.title(f"{state} - Cluster {cluster_id} - Run {run_id}")
@@ -175,131 +180,109 @@ def evaluate_model(model, test_X, test_Y, run_id=None, cluster_id=None, scaler=N
         device = next(model.parameters()).device
         test_tensor = torch.tensor(test_X, dtype=torch.float32).to(device)
         scaled_preds = model(test_tensor).cpu().numpy()
-        scaled_truth = test_Y
 
-        # Scaled MSE
-        mse_scaled = np.mean((scaled_preds - scaled_truth) ** 2, axis=0)
-
-        # Unscaled MSE (only on state columns)
+        # === Inverse Transform ===
         padded_preds = np.hstack([scaled_preds, np.zeros((scaled_preds.shape[0], CONTROL_COLS))])
-        padded_truth = np.hstack([scaled_truth, np.zeros((scaled_truth.shape[0], CONTROL_COLS))])
+        padded_truth = np.hstack([test_Y, np.zeros((test_Y.shape[0], CONTROL_COLS))])
+
         unscaled_preds = scaler.inverse_transform(padded_preds)[:, :STATE_COLS]
         unscaled_truth = scaler.inverse_transform(padded_truth)[:, :STATE_COLS]
+
+        # === Metrics ===
         mse_unscaled = np.mean((unscaled_preds - unscaled_truth) ** 2, axis=0)
+        mae_unscaled = np.mean(np.abs(unscaled_preds - unscaled_truth), axis=0)
 
         state_names = ['c', 'T_PM', 'd50', 'd90', 'd10', 'T_TM']
 
-        print("Test MSE per state (scaled):")
-        for name, m in zip(state_names, mse_scaled):
-            print(f"{name}: {m:.6e}")
+        # === Output to Console ===
+        print("\nTest MSE and MAE per state (preprocessed unscaled):")
+        for name, mse, mae in zip(state_names, mse_unscaled, mae_unscaled):
+            print(f"{name:>5s} | MSE: {mse:.6e}, MAE: {mae:.6e}")
 
-        print("\nTest MSE per state (unscaled):")
-        for name, m in zip(state_names, mse_unscaled):
-            print(f"{name}: {m:.6e}")
-
+        # === Logging ===
         if run_id is not None:
             with open(f"../results/ann/test_results_log.txt", "a") as f:
-                f.write(f"Run ID: {run_id}, Cluster {cluster_id} - Test MSE (scaled):\n")
-                for name, m in zip(state_names, mse_scaled):
-                    f.write(f"{name}: {m:.6e}\n")
-                f.write(f"Run ID: {run_id}, Cluster {cluster_id} - Test MSE (unscaled):\n")
-                for name, m in zip(state_names, mse_unscaled):
-                    f.write(f"{name}: {m:.6e}\n")
+                f.write(f"Run ID: {run_id}, Cluster {cluster_id} - Test MSE and MAE (preprocessed unscaled):\n")
+                for name, mse, mae in zip(state_names, mse_unscaled, mae_unscaled):
+                    f.write(f"{name:>5s} | MSE: {mse:.6e}, MAE: {mae:.6e}\n")
                 f.write("\n")
+
 
 def predict_open_loop(model, test_X, test_Y, window_size=5, input_dim=13, device='cpu', scaler=None, run_id=None):
     """
     Performs open-loop prediction and reports per-state metrics.
-
-    Parameters:
-    - model: Trained model
-    - initial_window: (window_size, 13) numpy array of recent scaled [state+control]
-    - windows_per_file: Number of windows to predict in each file
-    - window_size: Size of the sliding input window
-    - device: Device to run on
-    - scaler: Optional scaler to inverse-transform predictions
-    - run_id, cluster_id: Optional logging identifiers
-
-    Returns:
-    - preds_all: (steps, 6) numpy array of predicted state values
     """
-    
+
     model.eval()
     with torch.no_grad():
         total_steps = test_X.shape[0]
         windows_per_file = 1000 - window_size
         num_files = total_steps // windows_per_file
 
-        # Reshape test_X and test_Y by file
         test_X_files = test_X.reshape(num_files, windows_per_file, -1)
         test_Y_files = test_Y.reshape(num_files, windows_per_file, -1)
 
-        mse_list = []
-        mae_list = []
+        mse_list, mae_list = [], []
 
         for file_idx in range(num_files):
-            file_X = test_X_files[file_idx]  # (windows_per_file, input_dim * window_size)
-            file_Y = test_Y_files[file_idx]  # (windows_per_file, output_dim)
-            
-            current_window = file_X[0].copy().reshape(1, -1)  # shape: (1, window_size * input_dim)
+            file_X = test_X_files[file_idx]
+            file_Y = test_Y_files[file_idx]
+
+            current_window = file_X[0].copy().reshape(1, -1)
             preds = []
-            
+
             for step in range(windows_per_file):
-                # Predict next state
                 input_tensor = torch.tensor(current_window, dtype=torch.float32).to(device)
-                pred = model(input_tensor).cpu().numpy()[0]  # shape: (output_dim,)
+                pred = model(input_tensor).cpu().numpy()[0]
                 preds.append(pred)
 
                 if step + 1 >= windows_per_file:
-                    break  # No further window possible
+                    break
 
-                # Prepare next window:
                 current_window_matrix = current_window.reshape(window_size, input_dim)
-
-                # Slide: remove first row, add new row
                 next_window_matrix = np.zeros_like(current_window_matrix)
-                next_window_matrix[:-1] = current_window_matrix[1:]  # shift
+                next_window_matrix[:-1] = current_window_matrix[1:]
 
-                # Combine predicted state with original control inputs from next timestep
-                next_controls = file_X[step + 1].reshape(window_size, input_dim)[-1, 6:]  # last timestep inputs
+                next_controls = file_X[step + 1].reshape(window_size, input_dim)[-1, 6:]
                 new_row = np.concatenate([pred, next_controls])
                 next_window_matrix[-1] = new_row
 
-                # Flatten for next iteration
                 current_window = next_window_matrix.reshape(1, -1)
 
             preds_np = np.array(preds)
             targets_np = file_Y[:len(preds)]
 
-            # Inverse transform predictions and targets
             preds_unscaled = scaler.inverse_transform(
                 np.hstack([preds_np, np.zeros((preds_np.shape[0], input_dim - preds_np.shape[1]))])
             )[:, :preds_np.shape[1]]
 
-            targets_unscaled = scaler.inverse_transform(
+            truth_unscaled = scaler.inverse_transform(
                 np.hstack([targets_np, np.zeros((targets_np.shape[0], input_dim - targets_np.shape[1]))])
             )[:, :targets_np.shape[1]]
 
-            mse = np.mean((preds_unscaled - targets_unscaled) ** 2, axis=0)
-            mae = np.mean(np.abs(preds_unscaled - targets_unscaled), axis=0)
+            mse = np.mean((preds_unscaled - truth_unscaled) ** 2, axis=0)
+            mae = np.mean(np.abs(preds_unscaled - truth_unscaled), axis=0)
 
             mse_list.append(mse)
             mae_list.append(mae)
 
-        avg_mse = np.mean(mse_list, axis=0)
-        avg_mae = np.mean(mae_list, axis=0)
+        avg_mse_filt = np.mean(mse_list, axis=0)
+        avg_mae_filt = np.mean(mae_list, axis=0)
 
         state_names = ['c', 'T_PM', 'd50', 'd90', 'd10', 'T_TM']
 
-        print(f"\nAverage Test MSE and MAE per State (Open Loop, Run ID: {run_id}):")
+        print(f"\nAverage Test MSE and MAE per State (Open Loop, Run ID: {run_id})")
+        print("→ Preprocessed (Unscaled):")
         for i, state in enumerate(state_names):
-            print(f"{state:>5s} | MSE: {avg_mse[i]:.6e}, MAE: {avg_mae[i]:.6e}")
+            print(f"{state:>5s} | MSE: {avg_mse_filt[i]:.6e}, MAE: {avg_mae_filt[i]:.6e}")
 
         with open("../results/ann/test_results_log.txt", "a") as f:
-            f.write(f"\nAverage Test MSE and MAE per State (Open Loop, Run ID: {run_id}):\n")
+            f.write(f"\nAverage Test MSE and MAE per State (Open Loop, Run ID: {run_id})\n")
+            f.write("Preprocessed (Unscaled):\n")
             for i, state in enumerate(state_names):
-                f.write(f"{state:>5s} | MSE: {avg_mse[i]:.6e}, MAE: {avg_mae[i]:.6e}\n")
+                f.write(f"{state:>5s} | MSE: {avg_mse_filt[i]:.6e}, MAE: {avg_mae_filt[i]:.6e}\n")
             f.write("\n")
+
 
 def zscore_filter_trial(sample_file_path, z_thresh1=1.0, z_thresh2=3.0, cutoff=0.1):
     raw = np.loadtxt(sample_file_path, skiprows=1)
@@ -364,21 +347,36 @@ def train_cluster(cluster_id, cluster_path, args, run_id):
 
     all_files = [os.path.join(cluster_path, f) for f in os.listdir(cluster_path) if f.endswith(".txt")]
     train_files, test_files = split_data(all_files, test_ratio=0.1)
-
-    # Load cleaned and scaled train, test data
-    scaler = MinMaxScaler()
-
-    all_train_X, all_train_Y = [], []
+    
+    train_cleaned = []
     for file in train_files:
-        X, Y = load_batch_data(file, args.window_size, scaler)
+        cleaned = clean_batch(file, sm_filt=args.sm_filt)
+        train_cleaned.append(cleaned)
+    
+    # Step 2: Fit scaler on all cleaned data concatenated
+    scaler = MinMaxScaler()
+    scaler.fit(np.concatenate(train_cleaned, axis=0))  # ← fit once across all training data
+    
+    # Step 3: Apply scaling and windowing per file
+    all_train_X, all_train_Y = [], []
+    for cleaned in train_cleaned:
+        scaled = scaler.transform(cleaned)
+        X, Y= window_batch_data(scaled, args.window_size)
         all_train_X.append(X)
         all_train_Y.append(Y)
     train_X = np.concatenate(all_train_X, axis=0)
     train_Y = np.concatenate(all_train_Y, axis=0)
-
-    all_test_X, all_test_Y = [], []
+    
+    # Same for test data
+    test_cleaned= []
     for file in test_files:
-        X, Y = load_batch_data(file, args.window_size, scaler, test=False)
+        cleaned = clean_batch(file, sm_filt=args.sm_filt)
+        test_cleaned.append(cleaned)
+    
+    all_test_X, all_test_Y = [], []
+    for cleaned in test_cleaned:
+        scaled = scaler.transform(cleaned)  # ← use previously fit scaler
+        X, Y = window_batch_data(scaled, args.window_size)
         all_test_X.append(X)
         all_test_Y.append(Y)
     test_X = np.concatenate(all_test_X, axis=0)
@@ -394,7 +392,7 @@ def train_cluster(cluster_id, cluster_path, args, run_id):
             print(f"🔁 Using saved model from {model_path}")
             model.load_state_dict(torch.load(model_path, map_location=device))
             evaluate_model(model, test_X, test_Y, run_id=args.test_saved_model, cluster_id=cluster_id, scaler=scaler)
-            plot_sample_prediction(model, scaler, test_files, args.window_size, run_id=args.test_saved_model, cluster_id=cluster_id)
+            plot_sample_prediction(model, scaler, test_files, args.window_size, run_id=args.test_saved_model, cluster_id=cluster_id, sm_filt=args.sm_filt)
             return  # Exit early to skip training
         else:
             print(f"❌ Model file not found at {model_path}, proceeding to train a new model.")
@@ -484,6 +482,7 @@ def main():
     parser.add_argument("--log_scale", action="store_true")
     parser.add_argument("--log_hyperparams", action="store_true")
     parser.add_argument("--save_model", action="store_true")
+    parser.add_argument("--sm_filt", type=bool, default=True)
     parser.add_argument("--test_saved_model", type=int, help="Use a saved model by run_id instead of training")
     parser.add_argument("--open_loop_run", type=int, help="Run ID of model to use for open loop prediction")
     parser.add_argument("--early_stopping", action="store_true")
