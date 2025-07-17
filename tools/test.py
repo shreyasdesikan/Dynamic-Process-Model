@@ -1,0 +1,106 @@
+import os
+import random
+import numpy as np
+import torch
+from scipy.signal import butter, filtfilt
+from sklearn.preprocessing import MinMaxScaler
+import matplotlib.pyplot as plt
+from models.ANN.narx_model import get_model
+
+STATE_NAMES = ['c', 'T_PM', 'd50', 'd90', 'd10', 'T_TM']
+STATE_COLS = 6
+CONTROL_COLS = 7
+
+def clean_and_filter(data, z_thresh1=1.0, z_thresh2=3.0, cutoff=0.1, sm_filt=True):
+    """Applies stacked Z-score filtering on d10, d50, d90 columns (indices 2, 3, 4)."""
+    def apply_zscore_filter(subset, z_thresh):
+        cleaned = subset.copy()
+        states = cleaned[:, :STATE_COLS]
+        for col in [2, 3, 4]:  # d50, d90, d10
+            col_data = states[:, col]
+            mean = np.mean(col_data)
+            std = np.std(col_data)
+            z = (col_data - mean) / std
+            spike_mask = np.abs(z) > z_thresh
+            cleaned[spike_mask, col] = mean
+        return cleaned
+
+    # First pass
+    first_clean = apply_zscore_filter(data, z_thresh1)
+    
+    # Second pass
+    second_clean = apply_zscore_filter(first_clean, z_thresh2)
+    
+    if not sm_filt:
+        return first_clean, second_clean, second_clean
+    
+    lowpass_filtered = second_clean.copy()
+    b, a = butter(N=2, Wn=cutoff, btype='low', fs=1.0)
+    for col in range(6):  # STATE_COLS = 6
+        lowpass_filtered[:, col] = filtfilt(b, a, second_clean[:, col])
+
+    return first_clean, second_clean, lowpass_filtered
+
+def plot_sample_prediction(model, scaler, test_file, window_size, run_id, cluster_id, sm_filt=True):
+    os.makedirs(f"../results/ann/{run_id}", exist_ok=True)
+
+    # Pick a random test file
+    _, second_zthresh, filt_data = clean_and_filter(np.loadtxt(test_file, skiprows=1), z_thresh1=1.0, z_thresh2=3.0, cutoff=0.1, sm_filt=sm_filt)
+
+    # Prepare input/output using existing logic
+    scaled_data = scaler.fit_transform(filt_data)
+    X, Y, Y_unfilt = [], [], []
+    for t in range(len(scaled_data) - window_size):
+        window = scaled_data[t:t + window_size, :]
+        target = scaled_data[t + window_size, :STATE_COLS]
+        target_unfilt = second_zthresh[t + window_size, :STATE_COLS]
+        X.append(window.flatten())
+        Y.append(target)
+        Y_unfilt.append(target_unfilt)
+
+    X = torch.tensor(np.array(X), dtype=torch.float32).to(next(model.parameters()).device)
+    with torch.no_grad():
+        Y_pred = model(X).cpu().numpy()
+
+    # Pad and inverse-transform
+    def unscale(arr):
+        pad = np.zeros((arr.shape[0], CONTROL_COLS))
+        padded = np.hstack([arr, pad])
+        return scaler.inverse_transform(padded)[:, :STATE_COLS]
+
+    Y_true_unscaled = unscale(np.array(Y))
+    Y_true_unfilt = np.array(Y_unfilt)[:, :STATE_COLS]
+    Y_pred_unscaled = unscale(Y_pred)
+
+    state_names = ['c', 'T_PM', 'd50', 'd90', 'd10', 'T_TM']
+
+    for i, state in enumerate(state_names):
+        plt.figure()
+        plt.plot(Y_true_unfilt[:, i], label="Unfiltered")
+        plt.plot(Y_pred_unscaled[:, i], label="Predicted", linestyle="--")
+        plt.title(f"{state} - Cluster {cluster_id} - Run {run_id}")
+        plt.xlabel("Timestep")
+        plt.ylabel(state)
+        plt.legend()
+        plt.grid(True)
+        plt.show()  # ← Force blocking display of each plot
+        plt.close()
+
+
+
+
+def main():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    base_path = "../Data/clustered"
+    cluster_path = os.path.join(base_path, f"cluster0")
+    test_file = os.path.join(cluster_path, "file_77600.txt")
+    model_path = f"../results/ann/model_cluster0_run1752226124.pt"
+    
+    scaler = MinMaxScaler()
+    model = get_model(input_size=(10 * (STATE_COLS + CONTROL_COLS)), model_type="stacked_lstm_reg", window_size=10).to(device)
+    model.load_state_dict(torch.load(model_path, map_location=device))
+    plot_sample_prediction(model, scaler, test_file, window_size=10, run_id=1752226124, cluster_id=0)
+
+if __name__ == "__main__":
+    main()

@@ -199,20 +199,3 @@ early_stopping: False
 early_stop_patience: 10
 test_zscore_filter: False
 
-===== Run ID: 1752580604 | Cluster 0 =====
-clusters: [0]
-train_all: False
-epochs: 100
-lr: 0.001
-batch_size: 64
-window_size: 10
-model: stacked_lstm_reg
-log_scale: False
-log_hyperparams: True
-save_model: True
-sm_filt: True
-test_saved_model: None
-open_loop_run: None
-early_stopping: False
-early_stop_patience: 10
-test_zscore_filter: False
