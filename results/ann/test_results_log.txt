@@ -80,3 +80,11 @@ Preprocessed (Unscaled):
   d10 | MSE: 3.313768e-09, MAE: 4.188744e-05
  T_TM | MSE: 1.861391e+00, MAE: 6.629067e-01
 
+Run ID: 1752708457, Cluster 0 - Test MSE and MAE (preprocessed unscaled):
+    c | MSE: 7.690774e-09, MAE: 5.337754e-05
+ T_PM | MSE: 4.212034e-03, MAE: 4.105121e-02
+  d50 | MSE: 7.749002e-13, MAE: 6.560585e-07
+  d90 | MSE: 1.181104e-12, MAE: 8.577337e-07
+  d10 | MSE: 5.905975e-13, MAE: 5.925286e-07
+ T_TM | MSE: 6.596629e-03, MAE: 4.930706e-02
+

@@ -75,19 +75,37 @@ def plot_sample_prediction(model, scaler, test_file, window_size, run_id, cluste
     state_names = ['c', 'T_PM', 'd50', 'd90', 'd10', 'T_TM']
 
     for i, state in enumerate(state_names):
-        plt.figure()
-        plt.plot(Y_true_unfilt[:, i], label="Unfiltered")
-        plt.plot(Y_true_unscaled[:, i], label="True")
-        plt.plot(Y_pred_unscaled[:, i], label="Predicted", linestyle="--")
-        plt.title(f"{state} - Cluster {cluster_id} - Run {run_id}")
-        plt.xlabel("Timestep")
-        plt.ylabel(state)
-        plt.legend()
-        plt.grid(True)
-        plt.show()  # ← Force blocking display of each plot
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+        # LEFT subplot: Raw vs Predicted
+        axes[0].plot(Y_true_unfilt[:, i], label="Unsmoothed Raw data")
+        axes[0].plot(Y_pred_unscaled[:, i], label="Predicted", linestyle="--")
+        axes[0].set_title(f"{state} (Raw vs Predicted)")
+        axes[0].set_xlabel("Timestep")
+        axes[0].set_ylabel(state)
+        axes[0].legend()
+        axes[0].grid(True)
+
+        # Capture y-limits from the left subplot
+        y_min, y_max = axes[0].get_ylim()
+
+        # RIGHT subplot: True vs Predicted
+        axes[1].plot(Y_true_unscaled[:, i], label="True")
+        axes[1].plot(Y_pred_unscaled[:, i], label="Predicted", linestyle="--")
+        axes[1].set_title(f"{state} (True vs Predicted)")
+        axes[1].set_xlabel("Timestep")
+        axes[1].set_ylabel(state)
+        axes[1].legend()
+        axes[1].grid(True)
+
+        # Apply y-limits to the second plot
+        axes[1].set_ylim(y_min, y_max)
+
+        # Save to same location
+        save_path = f"../results/ann/{run_id}/state_{state}_cluster{cluster_id}.png"
+        plt.tight_layout()
+        plt.savefig(save_path)
         plt.close()
-
-
 
 
 def main():
