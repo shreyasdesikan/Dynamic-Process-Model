@@ -1,0 +1,34 @@
+Run ID: 1752712318, Cluster 0, Model - bilstm_multihead - Test MSE and MAE (preprocessed unscaled):
+Closed Loop:
+    c | MSE: 8.228807e-09, MAE: 6.810328e-05
+ T_PM | MSE: 6.862812e-03, MAE: 5.287996e-02
+  d50 | MSE: 1.632874e-12, MAE: 1.016929e-06
+  d90 | MSE: 1.302895e-12, MAE: 9.458994e-07
+  d10 | MSE: 5.074289e-13, MAE: 5.320540e-07
+ T_TM | MSE: 7.371018e-03, MAE: 5.154095e-02
+
+Open Loop:
+    c | MSE: 9.122331e-05, MAE: 6.767226e-03
+ T_PM | MSE: 8.962231e+01, MAE: 6.833105e+00
+  d50 | MSE: 3.574755e-08, MAE: 1.509281e-04
+  d90 | MSE: 6.514575e-08, MAE: 2.036692e-04
+  d10 | MSE: 5.324864e-09, MAE: 5.470941e-05
+ T_TM | MSE: 8.600389e+01, MAE: 6.633722e+00
+
+Run ID: 1752712318, Cluster 0, Model - bilstm_multihead - Test MSE and MAE (preprocessed unscaled):
+Closed Loop:
+    c | MSE: 5.519181e-08, MAE: 1.873258e-04
+ T_PM | MSE: 3.233437e-02, MAE: 1.273062e-01
+  d50 | MSE: 1.160019e-12, MAE: 8.530335e-07
+  d90 | MSE: 1.814087e-12, MAE: 1.037840e-06
+  d10 | MSE: 1.453142e-12, MAE: 9.368011e-07
+ T_TM | MSE: 4.610539e-02, MAE: 1.501738e-01
+
+Open Loop:
+    c | MSE: 1.307974e-05, MAE: 2.914391e-03
+ T_PM | MSE: 1.176062e+01, MAE: 2.601040e+00
+  d50 | MSE: 9.138891e-09, MAE: 8.092774e-05
+  d90 | MSE: 2.108643e-08, MAE: 1.178106e-04
+  d10 | MSE: 1.456590e-09, MAE: 2.902265e-05
+ T_TM | MSE: 1.142118e+01, MAE: 2.552458e+00
+

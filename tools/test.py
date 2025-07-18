@@ -3,9 +3,9 @@ import random
 import numpy as np
 import torch
 from scipy.signal import butter, filtfilt
-from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
-from models.ANN.narx_model import get_model
+from tuning.model import BidirectionalLSTMWithMultiHead
 
 STATE_NAMES = ['c', 'T_PM', 'd50', 'd90', 'd10', 'T_TM']
 STATE_COLS = 6
@@ -77,6 +77,7 @@ def plot_sample_prediction(model, scaler, test_file, window_size, run_id, cluste
     for i, state in enumerate(state_names):
         plt.figure()
         plt.plot(Y_true_unfilt[:, i], label="Unfiltered")
+        plt.plot(Y_true_unscaled[:, i], label="True")
         plt.plot(Y_pred_unscaled[:, i], label="Predicted", linestyle="--")
         plt.title(f"{state} - Cluster {cluster_id} - Run {run_id}")
         plt.xlabel("Timestep")
@@ -92,15 +93,14 @@ def plot_sample_prediction(model, scaler, test_file, window_size, run_id, cluste
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    base_path = "../Data/clustered"
-    cluster_path = os.path.join(base_path, f"cluster0")
-    test_file = os.path.join(cluster_path, "file_77600.txt")
-    model_path = f"../results/ann/model_cluster0_run1752226124.pt"
+    base_path = "../Beat-the-Felix"
+    test_file = os.path.join(base_path, "file_12738.txt")
+    model_path = os.path.join(base_path, f"model_cluster0_run1752708457.pt")
     
-    scaler = MinMaxScaler()
-    model = get_model(input_size=(10 * (STATE_COLS + CONTROL_COLS)), model_type="stacked_lstm_reg", window_size=10).to(device)
+    scaler = StandardScaler()
+    model = BidirectionalLSTMWithMultiHead(hidden_dim=128, fc_dim=64, num_layers=2).to(device)
     model.load_state_dict(torch.load(model_path, map_location=device))
-    plot_sample_prediction(model, scaler, test_file, window_size=10, run_id=1752226124, cluster_id=0)
+    plot_sample_prediction(model, scaler, test_file, window_size=5, run_id=1752708457, cluster_id=0)
 
 if __name__ == "__main__":
     main()
