@@ -1,3 +1,19 @@
+# Tuning results
+tools/tuning/results/*
+
+# Whitelist specific runs and their contents
+!tools/tuning/results/1752708457/
+!tools/tuning/results/1752708457/**
+!tools/tuning/results/1752711443/
+!tools/tuning/results/1752711443/**
+!tools/tuning/results/1752710281/
+!tools/tuning/results/1752710281/**
+!tools/tuning/results/1752712318/
+!tools/tuning/results/1752712318/**
+!tools/tuning/results/1752712023/
+!tools/tuning/results/1752712023/**
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -8,6 +24,7 @@ __pycache__/
 
 # Distribution / packaging
 .Python
+Data/clustered/
 build/
 develop-eggs/
 dist/
